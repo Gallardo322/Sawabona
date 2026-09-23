@@ -8,7 +8,7 @@ from fpdf import FPDF
 
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(
-    page_title="Sistema de Entrevista y Control de Pacientes",
+    page_title="Sistema de Consejería y Control Médico",
     page_icon="📋",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -39,14 +39,14 @@ def init_db():
             datos_json TEXT
         )
     ''')
-    # Tabla de Control de Medicamentos
+    # Tabla de Medicamentos
     c.execute('''
         CREATE TABLE IF NOT EXISTS medicamentos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            paciente_id TEXT NOT NULL,
-            fecha_registro TEXT NOT NULL,
-            usuario_registro TEXT NOT NULL,
-            medicamentos_json TEXT NOT NULL,
+            paciente_id TEXT PRIMARY KEY,
+            fecha_registro TEXT,
+            fecha_modificacion TEXT,
+            usuario_registro TEXT,
+            meds_json TEXT,
             observaciones TEXT
         )
     ''')
@@ -121,30 +121,53 @@ def guardar_medicamentos(paciente_id, lista_meds, observaciones, usuario):
     fecha_actual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     meds_json = json.dumps(lista_meds, ensure_ascii=False)
     
-    c.execute('''
-        INSERT INTO medicamentos (paciente_id, fecha_registro, usuario_registro, medicamentos_json, observaciones)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (paciente_id, fecha_actual, usuario, meds_json, observaciones))
+    c.execute('SELECT paciente_id FROM medicamentos WHERE paciente_id = ?', (paciente_id,))
+    existe = c.fetchone()
+    
+    if existe:
+        c.execute('''
+            UPDATE medicamentos 
+            SET fecha_modificacion = ?, meds_json = ?, observaciones = ?
+            WHERE paciente_id = ?
+        ''', (fecha_actual, meds_json, observaciones, paciente_id))
+    else:
+        c.execute('''
+            INSERT INTO medicamentos (paciente_id, fecha_registro, fecha_modificacion, usuario_registro, meds_json, observaciones)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (paciente_id, fecha_actual, fecha_actual, usuario, meds_json, observaciones))
+        
     conn.commit()
     conn.close()
 
-def obtener_historial_medicamentos(paciente_id):
+def obtener_medicamentos(paciente_id):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('''
-        SELECT id, fecha_registro, usuario_registro, medicamentos_json, observaciones 
-        FROM medicamentos WHERE paciente_id = ? ORDER BY id DESC
-    ''', (paciente_id,))
+    c.execute('SELECT meds_json, observaciones, fecha_registro, fecha_modificacion, usuario_registro FROM medicamentos WHERE paciente_id = ?', (paciente_id,))
+    row = c.fetchone()
+    conn.close()
+    if row:
+        return json.loads(row[0]), row[1], row[2], row[3], row[4]
+    return [], "", None, None, None
+
+def listar_todos_medicamentos():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('SELECT paciente_id, meds_json, observaciones, fecha_modificacion FROM medicamentos')
     rows = c.fetchall()
     conn.close()
+    
     resultado = []
     for r in rows:
+        p_id, m_json, obs, f_mod = r
+        try:
+            m_list = json.loads(m_json)
+        except:
+            m_list = []
         resultado.append({
-            "id": r[0],
-            "fecha": r[1],
-            "usuario": r[2],
-            "medicamentos": json.loads(r[3]),
-            "observaciones": r[4]
+            "paciente_id": p_id,
+            "medicamentos": m_list,
+            "observaciones": obs,
+            "fecha_modificacion": f_mod
         })
     return resultado
 
@@ -152,9 +175,9 @@ def obtener_historial_medicamentos(paciente_id):
 class PDFReport(FPDF):
     def header(self):
         self.set_font("Helvetica", "B", 14)
-        self.cell(self.epw, 8, "ENTREVISTA INICIAL DE CONSEJERIA Y CONTROL MEDICO", border=0, align="C", new_x="LMARGIN", new_y="NEXT")
+        self.cell(self.epw, 8, "SISTEMA CLINICO DE CONSEJERIA Y CONTROL MEDICO", border=0, align="C", new_x="LMARGIN", new_y="NEXT")
         self.set_font("Helvetica", "I", 10)
-        self.cell(self.epw, 6, "Evaluacion Clinica y Esquema de Medicacion", border=0, align="C", new_x="LMARGIN", new_y="NEXT")
+        self.cell(self.epw, 6, "Reporte Oficial de Expediente", border=0, align="C", new_x="LMARGIN", new_y="NEXT")
         self.ln(4)
 
     def footer(self):
@@ -171,8 +194,8 @@ def limpiar_texto(texto):
         'ñ': 'n', 'Ñ': 'N', '¿': '', '¡': ''
     }
     for k, v in replacements.items():
-        texto = str(texto).replace(k, v)
-    return texto
+        texto = texto.replace(k, v)
+    return str(texto)
 
 def generar_pdf(paciente_id, datos):
     pdf = PDFReport()
@@ -256,44 +279,85 @@ def generar_pdf(paciente_id, datos):
     pdf.output(pdf_filename)
     return pdf_filename
 
-def generar_pdf_medicamentos(paciente_id, registro_med):
+def generar_pdf_medicamentos(paciente_id, lista_meds, observaciones):
     pdf = PDFReport()
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
     
     pdf.set_font("Helvetica", "B", 12)
-    pdf.cell(pdf.epw, 8, f"HOJA DE CONTROL DE MEDICAMENTOS - FOLIO: {limpiar_texto(paciente_id)}", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("Helvetica", "", 10)
-    pdf.cell(pdf.epw, 6, f"Fecha de emision/registro: {limpiar_texto(registro_med['fecha'])} | Registrado por: {limpiar_texto(registro_med['usuario'])}", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(pdf.epw, 8, f"HOJA DE CONTROL DE MEDICAMENTOS Y DOSIS", new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(pdf.epw, 7, f"PACIENTE / FOLIO: {limpiar_texto(paciente_id)}", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(pdf.epw, 6, f"Fecha de emision: {datetime.now().strftime('%d/%m/%Y %H:%M')}", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(4)
     
-    pdf.set_font("Helvetica", "B", 10)
-    pdf.cell(pdf.epw, 7, "ESQUEMA DE DOSIFICACION DIARIA", new_x="LMARGIN", new_y="NEXT")
+    # Tabla de Medicamentos
+    pdf.set_font("Helvetica", "B", 9)
+    col_widths = [45, 20, 20, 20, 22, 22, 41]
+    headers = ["Medicamento", "Manana", "Tarde", "Noche", "Dosis/Dia", "Existencia", "Indicaciones"]
     
-    col_w = [55, 25, 25, 25, 50]
-    headers = ["Medicamento", "Dosis Manana", "Dosis Tarde", "Dosis Noche", "Notas / Instrucciones"]
-    
-    pdf.set_font("Helvetica", "B", 8)
     for i, h in enumerate(headers):
-        pdf.cell(col_w[i], 6, h, border=1, align="C")
+        pdf.cell(col_widths[i], 7, h, border=1, align="C")
     pdf.ln()
     
-    pdf.set_font("Helvetica", "", 8)
-    for m in registro_med["medicamentos"]:
-        pdf.cell(col_w[0], 6, limpiar_texto(m.get("nombre", "")), border=1)
-        pdf.cell(col_w[1], 6, limpiar_texto(str(m.get("manana", "0"))), border=1, align="C")
-        pdf.cell(col_w[2], 6, limpiar_texto(str(m.get("tarde", "0"))), border=1, align="C")
-        pdf.cell(col_w[3], 6, limpiar_texto(str(m.get("noche", "0"))), border=1, align="C")
-        pdf.cell(col_w[4], 6, limpiar_texto(m.get("notas", "")), border=1, new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 9)
+    for m in lista_meds:
+        m_nom = limpiar_texto(m.get("nombre", ""))
+        m_man = float(m.get("manana", 0))
+        m_tar = float(m.get("tarde", 0))
+        m_noc = float(m.get("noche", 0))
+        m_ext = float(m.get("existencia", 0))
+        m_ind = limpiar_texto(m.get("indicaciones", ""))
+        dosis_dia = m_man + m_tar + m_noc
+        
+        pdf.cell(col_widths[0], 6, m_nom[:24], border=1)
+        pdf.cell(col_widths[1], 6, f"{m_man:g}", border=1, align="C")
+        pdf.cell(col_widths[2], 6, f"{m_tar:g}", border=1, align="C")
+        pdf.cell(col_widths[3], 6, f"{m_noc:g}", border=1, align="C")
+        pdf.cell(col_widths[4], 6, f"{dosis_dia:g}", border=1, align="C")
+        pdf.cell(col_widths[5], 6, f"{m_ext:g}", border=1, align="C")
+        pdf.cell(col_widths[6], 6, m_ind[:22], border=1, new_x="LMARGIN", new_y="NEXT")
         
     pdf.ln(4)
-    if registro_med.get("observaciones"):
+    if observaciones:
         pdf.set_font("Helvetica", "B", 10)
-        pdf.cell(pdf.epw, 6, "OBSERVACIONES GENERALES DE MEDICACION:", new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(pdf.epw, 6, "Observaciones de la Medicacion:", new_x="LMARGIN", new_y="NEXT")
         pdf.set_font("Helvetica", "", 9)
-        pdf.multi_cell(pdf.epw, 5, limpiar_texto(registro_med["observaciones"]), new_x="LMARGIN", new_y="NEXT")
+        pdf.multi_cell(pdf.epw, 5, limpiar_texto(observaciones), new_x="LMARGIN", new_y="NEXT")
         
-    pdf_filename = f"Medicamentos_{paciente_id}_{registro_med['id']}.pdf"
+    pdf_filename = f"Medicacion_Paciente_{paciente_id}.pdf"
+    pdf.output(pdf_filename)
+    return pdf_filename
+
+def generar_pdf_lista_compras(items_compra):
+    pdf = PDFReport()
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    
+    pdf.set_font("Helvetica", "B", 13)
+    pdf.cell(pdf.epw, 8, "REPORTE DE REABASTECIMIENTO Y COMPRA DE MEDICAMENTOS", new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.set_font("Helvetica", "I", 10)
+    pdf.cell(pdf.epw, 6, f"Pacientes con dosis insuficiente para la siguiente jornada - {datetime.now().strftime('%d/%m/%Y %H:%M')}", new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.ln(6)
+    
+    pdf.set_font("Helvetica", "B", 9)
+    col_widths = [30, 50, 25, 25, 30, 30]
+    headers = ["Paciente Folio", "Medicamento", "Existencia", "Dosis Diaria", "Estatus", "Comp. Rec. (7d)"]
+    
+    for i, h in enumerate(headers):
+        pdf.cell(col_widths[i], 7, h, border=1, align="C")
+    pdf.ln()
+    
+    pdf.set_font("Helvetica", "", 9)
+    for item in items_compra:
+        pdf.cell(col_widths[0], 6, limpiar_texto(item['paciente_id']), border=1, align="C")
+        pdf.cell(col_widths[1], 6, limpiar_texto(item['medicamento'])[:28], border=1)
+        pdf.cell(col_widths[2], 6, f"{item['existencia']:g}", border=1, align="C")
+        pdf.cell(col_widths[3], 6, f"{item['dosis_diaria']:g}", border=1, align="C")
+        pdf.cell(col_widths[4], 6, limpiar_texto(item['estatus']), border=1, align="C")
+        pdf.cell(col_widths[5], 6, f"{item['compra_recomendada']:g} unid.", border=1, align="C", new_x="LMARGIN", new_y="NEXT")
+        
+    pdf_filename = f"Lista_Compras_Medicamentos_{datetime.now().strftime('%Y%m%d')}.pdf"
     pdf.output(pdf_filename)
     return pdf_filename
 
@@ -309,7 +373,7 @@ if "nombre_completo" not in st.session_state:
 
 # --- PANTALLA DE LOGIN ---
 if not st.session_state["logged_in"]:
-    st.markdown("<h2 style='text-align: center;'>🔐 Acceso al Sistema de Pacientes y Medicamentos</h2>", unsafe_allow_html=True)
+    st.markdown("<h2 style='text-align: center;'>🔐 Acceso al Sistema de Entrevistas y Control Médico</h2>", unsafe_allow_html=True)
     st.markdown("<p style='text-align: center; color: gray;'>Ingrese sus credenciales para continuar</p>", unsafe_allow_html=True)
     
     col1, col2, col3 = st.columns([1, 2, 1])
@@ -338,7 +402,13 @@ else:
     
     menu = st.sidebar.radio(
         "Navegación",
-        ["📝 Nueva Entrevista / Editar", "💊 Control de Medicamentos", "🔍 Buscar y Listar Pacientes", "⚙️ Seguridad / Contraseña"]
+        [
+            "📝 Nueva Entrevista / Editar",
+            "🔍 Buscar y Listar Pacientes",
+            "💊 Control de Medicamentos y Dosis",
+            "🚨 Alertas de Existencia y Compras",
+            "⚙️ Seguridad / Contraseña"
+        ]
     )
     
     if st.sidebar.button("Cerrar Sesión", use_container_width=True):
@@ -508,122 +578,7 @@ else:
                     guardar_entrevista(paciente_id_input, datos_completos, st.session_state["username"])
                     st.success(f"✅ ¡Expediente {paciente_id_input} guardado correctamente en la base de datos!")
 
-    # --- SECCIÓN 2: CONTROL DE MEDICAMENTOS ---
-    elif menu == "💊 Control de Medicamentos":
-        st.title("💊 Control y Registro de Medicamentos por Paciente")
-        st.caption("Administración de esquemas de medicación diaria por paciente (Mañana, Tarde y Noche)")
-        
-        # Selección o ingreso de Folio de Paciente
-        pacientes_existentes = [p[0] for p in listar_pacientes()]
-        
-        col_med1, col_med2 = st.columns([2, 1])
-        with col_med1:
-            paciente_id_med = st.text_input("🔑 NÚMERO DE PACIENTE / FOLIO *", value="").strip()
-        with col_med2:
-            if pacientes_existentes:
-                paciente_sel = st.selectbox("O seleccione de la lista:", ["-- Seleccionar --"] + pacientes_existentes)
-                if paciente_sel != "-- Seleccionar --":
-                    paciente_id_med = paciente_sel
-
-        if paciente_id_med:
-            # Verificar si existe entrevista
-            datos_ent, _, _, _ = obtener_entrevista(paciente_id_med)
-            if datos_ent:
-                st.success(f"📌 Paciente localizado: Folio **{paciente_id_med}**")
-            else:
-                st.warning(f"⚠️ Nota: El Folio **{paciente_id_med}** aún no tiene entrevista inicial registrada, pero puede registrar sus medicamentos.")
-
-            st.divider()
-            st.subheader("📋 Registrar / Actualizar Esquema de Medicamentos")
-            
-            # Número de medicamentos a registrar
-            if "num_meds" not in st.session_state:
-                st.session_state["num_meds"] = 1
-                
-            col_b1, col_b2 = st.columns(2)
-            with col_b1:
-                if st.button("➕ Agregar otro medicamento"):
-                    st.session_state["num_meds"] += 1
-                    st.rerun()
-            with col_b2:
-                if st.session_state["num_meds"] > 1:
-                    if st.button("➖ Quitar último medicamento"):
-                        st.session_state["num_meds"] -= 1
-                        st.rerun()
-
-            with st.form("form_medicamentos"):
-                lista_meds_input = []
-                for idx in range(st.session_state["num_meds"]):
-                    st.markdown(f"##### 💊 Medicamento #{idx + 1}")
-                    cm1, cm2, cm3, cm4, cm5 = st.columns([3, 1.5, 1.5, 1.5, 3])
-                    with cm1:
-                        nombre_med = st.text_input(f"Nombre del Medicamento", key=f"med_nombre_{idx}")
-                    with cm2:
-                        dos_m = st.text_input(f"☀️ Mañana", value="0", key=f"med_m_{idx}", help="Cantidad/Dosis mañana")
-                    with cm3:
-                        dos_t = st.text_input(f"🌤️ Tarde", value="0", key=f"med_t_{idx}", help="Cantidad/Dosis tarde")
-                    with cm4:
-                        dos_n = st.text_input(f"🌙 Noche", value="0", key=f"med_n_{idx}", help="Cantidad/Dosis noche")
-                    with cm5:
-                        notas_med = st.text_input(f"Indicaciones / Notas", key=f"med_not_{idx}", placeholder="Ej. Tomar con alimentos")
-                    
-                    if nombre_med.strip():
-                        lista_meds_input.append({
-                            "nombre": nombre_med.strip(),
-                            "manana": dos_m.strip(),
-                            "tarde": dos_t.strip(),
-                            "noche": dos_n.strip(),
-                            "notas": notas_med.strip()
-                        })
-                    st.divider()
-                
-                obs_meds = st.text_area("Observaciones Generales de Medicación (Alergias, reacciones, instrucciones especiales)")
-                btn_guardar_meds = st.form_submit_button("💾 Guardar Esquema de Medicamentos", use_container_width=True)
-                
-                if btn_guardar_meds:
-                    if not lista_meds_input:
-                        st.error("⚠️ Ingrese al menos un medicamento con su nombre.")
-                    else:
-                        guardar_medicamentos(paciente_id_med, lista_meds_input, obs_meds, st.session_state["username"])
-                        st.success(f"✅ ¡Esquema de medicamentos guardado exitosamente para el folio {paciente_id_med}!")
-                        st.session_state["num_meds"] = 1
-
-            # HISTORIAL DE MEDICACIÓN DEL PACIENTE
-            st.divider()
-            st.subheader(f"📜 Historial y Fichas Imprimibles de Medicación ({paciente_id_med})")
-            historial = obtener_historial_medicamentos(paciente_id_med)
-            
-            if not historial:
-                st.info("No hay registros previos de medicamentos para este paciente.")
-            else:
-                for reg in historial:
-                    with st.expander(f"💊 Registro del {reg['fecha']} (por {reg['usuario']})"):
-                        st.write(f"**Observaciones:** {reg['observaciones'] or 'Ninguna'}")
-                        
-                        # Mostrar Tabla
-                        meds_df = []
-                        for m in reg['medicamentos']:
-                            meds_df.append({
-                                "Medicamento": m.get("nombre"),
-                                "☀️ Mañana": m.get("manana"),
-                                "🌤️ Tarde": m.get("tarde"),
-                                "🌙 Noche": m.get("noche"),
-                                "Notas": m.get("notas")
-                            })
-                        st.dataframe(meds_df, use_container_width=True)
-                        
-                        # Generar y Descargar PDF
-                        pdf_med_file = generar_pdf_medicamentos(paciente_id_med, reg)
-                        with open(pdf_med_file, "rb") as f_med:
-                            st.download_button(
-                                label="🖨️ Descargar Hoja de Medicación (PDF)",
-                                data=f_med,
-                                file_name=f"Medicamentos_{paciente_id_med}.pdf",
-                                mime="application/pdf",
-                                key=f"btn_pdf_med_{reg['id']}"
-                            )
-
-    # --- SECCIÓN 3: BUSCAR Y LISTAR PACIENTES ---
+    # --- SECCIÓN 2: BUSCAR Y LISTAR PACIENTES ---
     elif menu == "🔍 Buscar y Listar Pacientes":
         st.title("🔍 Registro de Pacientes")
         
@@ -648,14 +603,210 @@ else:
                             pdf_file = generar_pdf(p_id, datos_p)
                             with open(pdf_file, "rb") as f:
                                 st.download_button(
-                                    label="🖨️ Descargar Entrevista (PDF)",
+                                    label="🖨️ Descargar PDF Entrevista",
                                     data=f,
                                     file_name=f"Entrevista_{p_id}.pdf",
                                     mime="application/pdf",
-                                    key=f"pdf_{p_id}"
+                                    key=f"pdf_e_{p_id}"
                                 )
 
-    # --- SECCIÓN 4: SEGURIDAD ---
+    # --- SECCIÓN 3: CONTROL DE MEDICAMENTOS Y EXISTENCIAS ---
+    elif menu == "💊 Control de Medicamentos y Dosis":
+        st.title("💊 Control y Registro de Medicación por Paciente")
+        st.caption("Administra la dosificación diaria (mañana, tarde, noche) y control de existencias")
+        
+        pacientes_list = [p[0] for p in listar_pacientes()]
+        
+        col_m1, col_m2 = st.columns([2, 1])
+        with col_m1:
+            paciente_med_id = st.text_input("🔑 Escriba o seleccione el NÚMERO DE PACIENTE / FOLIO", value="").strip()
+        with col_m2:
+            if pacientes_list:
+                selected_pac = st.selectbox("O elija de la lista de pacientes registrados:", ["-- Seleccionar --"] + pacientes_list)
+                if selected_pac != "-- Seleccionar --":
+                    paciente_med_id = selected_pac
+
+        if paciente_med_id:
+            meds_guardados, obs_guardadas, f_reg, f_mod, u_reg = obtener_medicamentos(paciente_med_id)
+            if f_mod:
+                st.success(f"📌 Esquema cargado para paciente **{paciente_med_id}**. Última modificación: {f_mod} por {u_reg}")
+            else:
+                st.info(f"🆕 Registrando nuevo esquema de medicamentos para el paciente **{paciente_med_id}**.")
+
+            st.markdown("### Lista de Medicamentos, Dosificación y Stock")
+            st.caption("Especifique las dosis por horario y la cantidad actual en existencia para calcular alertas automáticamente.")
+
+            # Estado local para número de renglones de medicamentos
+            num_meds_key = f"num_meds_{paciente_med_id}"
+            if num_meds_key not in st.session_state:
+                st.session_state[num_meds_key] = max(len(meds_guardados), 1)
+
+            col_add1, col_add2 = st.columns([1, 4])
+            with col_add1:
+                if st.button("➕ Agregar Medicamento"):
+                    st.session_state[num_meds_key] += 1
+                    st.rerun()
+
+            lista_meds_input = []
+            
+            with st.form("form_medicamentos"):
+                for idx in range(st.session_state[num_meds_key]):
+                    m_default = meds_guardados[idx] if idx < len(meds_guardados) else {}
+                    
+                    st.markdown(f"##### 💊 Medicamento #{idx+1}")
+                    cm1, cm2, cm3, cm4, cm5, cm6 = st.columns([2.5, 1, 1, 1, 1.2, 2.3])
+                    
+                    with cm1:
+                        nombre_m = st.text_input("Nombre del Medicamento", value=m_default.get("nombre", ""), key=f"m_nom_{paciente_med_id}_{idx}")
+                    with cm2:
+                        manana_m = st.number_input("☀️ Mañana", min_value=0.0, step=0.5, value=float(m_default.get("manana", 0)), key=f"m_man_{paciente_med_id}_{idx}")
+                    with cm3:
+                        tarde_m = st.number_input("🌤️ Tarde", min_value=0.0, step=0.5, value=float(m_default.get("tarde", 0)), key=f"m_tar_{paciente_med_id}_{idx}")
+                    with cm4:
+                        noche_m = st.number_input("🌙 Noche", min_value=0.0, step=0.5, value=float(m_default.get("noche", 0)), key=f"m_noc_{paciente_med_id}_{idx}")
+                    with cm5:
+                        existencia_m = st.number_input("📦 Existencia (Unid.)", min_value=0.0, step=1.0, value=float(m_default.get("existencia", 0)), key=f"m_ext_{paciente_med_id}_{idx}")
+                    with cm6:
+                        indic_m = st.text_input("Indicaciones / Notas", value=m_default.get("indicaciones", ""), key=f"m_ind_{paciente_med_id}_{idx}")
+
+                    dosis_diaria = manana_m + tarde_m + noche_m
+                    if nombre_m:
+                        if existencia_m < dosis_diaria:
+                            st.error(f"⚠️ **ALERTA CRÍTICA**: Existencia ({existencia_m:g}) es menor a la dosis diaria ({dosis_diaria:g}). ¡Falta medicamento para mañana!")
+                        elif existencia_m < dosis_diaria * 3:
+                            st.warning(f"🟡 **ADVERTENCIA**: Queda poca existencia ({existencia_m:g}). Alcanza solo para {int(existencia_m/dosis_diaria if dosis_diaria>0 else 0)} día(s).")
+                        else:
+                            st.success(f"🟢 Stock suficiente: {existencia_m:g} unidades (Cubre aprox {int(existencia_m/dosis_diaria if dosis_diaria>0 else 0)} días).")
+
+                    if nombre_m:
+                        lista_meds_input.append({
+                            "nombre": nombre_m,
+                            "manana": manana_m,
+                            "tarde": tarde_m,
+                            "noche": noche_m,
+                            "existencia": existencia_m,
+                            "indicaciones": indic_m
+                        })
+                    st.divider()
+
+                obs_meds = st.text_area("Observaciones Generales de la Medicación (Alergias, indicaciones de resguardo, etc.)", value=obs_guardadas)
+                
+                btn_guardar_meds = st.form_submit_button("💾 Guardar Esquema y Existencias de Medicamentos", use_container_width=True)
+                
+                if btn_guardar_meds:
+                    guardar_medicamentos(paciente_med_id, lista_meds_input, obs_meds, st.session_state["username"])
+                    st.success(f"✅ ¡Esquema de medicamentos y stock guardados para el paciente **{paciente_med_id}**!")
+
+            # Descargar PDF de Medicación
+            if meds_guardados:
+                st.markdown("#### 🖨️ Exportar Hoja de Medicación")
+                pdf_m_file = generar_pdf_medicamentos(paciente_med_id, meds_guardados, obs_guardadas)
+                with open(pdf_m_file, "rb") as f:
+                    st.download_button(
+                        label="📄 Descargar Hoja de Medicación (PDF)",
+                        data=f,
+                        file_name=f"Medicacion_{paciente_med_id}.pdf",
+                        mime="application/pdf"
+                    )
+
+    # --- SECCIÓN 4: ALERTAS DE EXISTENCIA Y LISTA DE COMPRAS ---
+    elif menu == "🚨 Alertas de Existencia y Compras":
+        st.title("🚨 Lista de Compras y Reabastecimiento de Medicamentos")
+        st.caption("Monitoreo automático de stock por paciente y generación de lista de reabastecimiento")
+        
+        todos_meds = listar_todos_medicamentos()
+        
+        items_compra = []
+        sin_stock_critico = []
+        stock_preventivo = []
+        
+        for reg in todos_meds:
+            p_id = reg["paciente_id"]
+            for m in reg["medicamentos"]:
+                nom = m.get("nombre", "")
+                if not nom:
+                    continue
+                man = float(m.get("manana", 0))
+                tar = float(m.get("tarde", 0))
+                noc = float(m.get("noche", 0))
+                ext = float(m.get("existencia", 0))
+                dosis_dia = man + tar + noc
+                
+                if dosis_dia <= 0:
+                    continue
+                
+                # Alerta crítica: existencia no cubre 1 día entero
+                if ext < dosis_dia:
+                    item = {
+                        "paciente_id": p_id,
+                        "medicamento": nom,
+                        "existencia": ext,
+                        "dosis_diaria": dosis_dia,
+                        "estatus": "CRÍTICO (Sin dosis para mañana)",
+                        "compra_recomendada": max((dosis_dia * 7) - ext, dosis_dia)
+                    }
+                    sin_stock_critico.append(item)
+                    items_compra.append(item)
+                elif ext < (dosis_dia * 3):
+                    item = {
+                        "paciente_id": p_id,
+                        "medicamento": nom,
+                        "existencia": ext,
+                        "dosis_diaria": dosis_dia,
+                        "estatus": "PREVENTIVO (< 3 días)",
+                        "compra_recomendada": max((dosis_dia * 7) - ext, dosis_dia)
+                    }
+                    stock_preventivo.append(item)
+                    items_compra.append(item)
+
+        col_k1, col_k2 = st.columns(2)
+        with col_k1:
+            st.metric("🚨 Pacientes con Alerta Crítica (Falta para mañana)", len(sin_stock_critico))
+        with col_k2:
+            st.metric("🟡 Pacientes con Alerta Preventiva (< 3 días stock)", len(stock_preventivo))
+
+        st.divider()
+
+        if not items_compra:
+            st.balloons()
+            st.success("🎉 ¡Excelente! Todos los pacientes tienen existencia suficiente de medicamentos para los próximos días.")
+        else:
+            if sin_stock_critico:
+                st.error("### 🔴 PACIENTES A LOS QUE LES FALTA MEDICAMENTO PARA EL DÍA SIGUIENTE")
+                st.caption("Requieren compra inmediata de reabastecimiento:")
+                
+                for item in sin_stock_critico:
+                    st.markdown(f"📌 **Paciente Folio:** `{item['paciente_id']}` | **Medicamento:** `{item['medicamento']}`")
+                    c_i1, c_i2, c_i3, c_i4 = st.columns(4)
+                    c_i1.write(f"**Existencia Actual:** {item['existencia']:g} unid.")
+                    c_i2.write(f"**Dosis Diaria:** {item['dosis_diaria']:g} unid.")
+                    c_i3.write(f"**Estatus:** 🔴 Insuficiente para mañana")
+                    c_i4.write(f"**Sugerencia Compra (7d):** {item['compra_recomendada']:g} unid.")
+                    st.divider()
+
+            if stock_preventivo:
+                st.warning("### 🟡 PACIENTES EN ALERTA PREVENTIVA (Stock para menos de 3 días)")
+                for item in stock_preventivo:
+                    st.markdown(f"📌 **Paciente Folio:** `{item['paciente_id']}` | **Medicamento:** `{item['medicamento']}`")
+                    c_i1, c_i2, c_i3, c_i4 = st.columns(4)
+                    c_i1.write(f"**Existencia Actual:** {item['existencia']:g} unid.")
+                    c_i2.write(f"**Dosis Diaria:** {item['dosis_diaria']:g} unid.")
+                    c_i3.write(f"**Estatus:** 🟡 Alcanza para {int(item['existencia']/item['dosis_diaria'])} día(s)")
+                    c_i4.write(f"**Sugerencia Compra (7d):** {item['compra_recomendada']:g} unid.")
+                    st.divider()
+
+            st.markdown("### 🖨️ Exportar Orden / Lista de Compras para Farmacia")
+            pdf_compras_file = generar_pdf_lista_compras(items_compra)
+            with open(pdf_compras_file, "rb") as f:
+                st.download_button(
+                    label="📄 Descargar Lista de Compras en PDF",
+                    data=f,
+                    file_name=f"Lista_Compras_Medicamentos_{datetime.now().strftime('%Y%m%d')}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True
+                )
+
+    # --- SECCIÓN 5: SEGURIDAD ---
     elif menu == "⚙️ Seguridad / Contraseña":
         st.title("⚙️ Configuración de Seguridad")
         st.subheader("Cambiar Contraseña de Usuario")
