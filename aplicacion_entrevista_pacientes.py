@@ -3,12 +3,12 @@ import sqlite3
 import json
 import hashlib
 import os
-from datetime import datetime
+from datetime import datetime, date
 from fpdf import FPDF
 
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(
-    page_title="Sistema de Gestión y Consejería de Pacientes",
+    page_title="Sistema de Entrevista y Control Medico",
     page_icon="📋",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -16,12 +16,11 @@ st.set_page_config(
 
 DB_FILE = "sistema_pacientes.db"
 
-# --- FUNCIONES DE BASE DE DATOS Y MIGRACIONES ---
+# --- FUNCIONES DE BASE DE DATOS ---
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    
-    # 1. Tabla de Usuarios del Sistema (Login)
+    # Tabla de Usuarios del Sistema (login)
     c.execute('''
         CREATE TABLE IF NOT EXISTS usuarios (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -30,10 +29,10 @@ def init_db():
             nombre_completo TEXT
         )
     ''')
-    
-    # 2. Tabla de Registro Inicial de Pacientes
+    # Tabla de Registro de Usuarios / Pacientes
+    # Estatus: 'A' = Activo, 'B' = Bloqueado
     c.execute('''
-        CREATE TABLE IF NOT EXISTS pacientes_registro (
+        CREATE TABLE IF NOT EXISTS pacientes (
             paciente_id TEXT PRIMARY KEY,
             nombre_completo TEXT NOT NULL,
             fecha_ingreso TEXT NOT NULL,
@@ -45,19 +44,18 @@ def init_db():
             usuario_registro TEXT
         )
     ''')
-    
-    # 3. Tabla de Entrevistas de Consejería
+    # Tabla de Entrevistas
     c.execute('''
         CREATE TABLE IF NOT EXISTS entrevistas (
             paciente_id TEXT PRIMARY KEY,
             fecha_registro TEXT,
             fecha_modificacion TEXT,
             usuario_registro TEXT,
-            datos_json TEXT
+            datos_json TEXT,
+            FOREIGN KEY (paciente_id) REFERENCES pacientes (paciente_id)
         )
     ''')
-    
-    # 4. Tabla de Control de Medicamentos
+    # Tabla de Medicamentos y Dosis por Paciente
     c.execute('''
         CREATE TABLE IF NOT EXISTS medicamentos (
             paciente_id TEXT PRIMARY KEY,
@@ -65,23 +63,23 @@ def init_db():
             observaciones TEXT,
             fecha_registro TEXT,
             fecha_modificacion TEXT,
-            usuario_registro TEXT
+            usuario_registro TEXT,
+            FOREIGN KEY (paciente_id) REFERENCES pacientes (paciente_id)
         )
     ''')
-    
-    # 5. Tabla de Historial de Entregas de Medicamentos
+    # Tabla de Historial de Entregas de Medicamentos
     c.execute('''
-        CREATE TABLE IF NOT EXISTS entregas_medicamentos (
+        CREATE TABLE IF NOT EXISTS entregas_meds (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            paciente_id TEXT NOT NULL,
-            fecha_entrega TEXT NOT NULL,
-            usuario_registro TEXT NOT NULL,
-            entregas_json TEXT NOT NULL,
-            observaciones TEXT
+            paciente_id TEXT,
+            fecha_entrega TEXT,
+            entregas_json TEXT,
+            usuario_registro TEXT,
+            FOREIGN KEY (paciente_id) REFERENCES pacientes (paciente_id)
         )
     ''')
     
-    # Crear usuario admin por defecto si no existe
+    # Crear usuario administrador por defecto si no existe
     c.execute('SELECT * FROM usuarios WHERE username = ?', ('admin',))
     if not c.fetchone():
         default_pass = hashlib.sha256("admin123".encode()).hexdigest()
@@ -103,56 +101,26 @@ def verificar_login(username, password):
     conn.close()
     return result
 
-# --- FUNCIONES DE PACIENTES REGISTRO ---
-def generar_siguiente_folio():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('SELECT paciente_id FROM pacientes_registro')
-    rows = c.fetchall()
-    conn.close()
-    max_num = 0
-    for r in rows:
-        pid = r[0]
-        if pid.startswith("PAC-"):
-            try:
-                num = int(pid.split("-")[1])
-                if num > max_num:
-                    max_num = num
-            except:
-                pass
-    return f"PAC-{(max_num + 1):03d}"
-
-def buscar_duplicado_nombre(nombre_completo):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('SELECT paciente_id, nombre_completo, estatus FROM pacientes_registro')
-    rows = c.fetchall()
-    conn.close()
-    nombre_norm = nombre_completo.strip().lower()
-    for r in rows:
-        if r[1].strip().lower() == nombre_norm:
-            return r  # (paciente_id, nombre_completo, estatus)
-    return None
-
-def guardar_paciente_registro(paciente_id, nombre_completo, fecha_ingreso, fecha_nacimiento, sexo, estatus='A', usuario='admin'):
+# --- FUNCIONES PACIENTES ---
+def guardar_paciente(paciente_id, nombre_completo, fecha_ingreso, fecha_nacimiento, sexo, usuario, estatus='A'):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     fecha_actual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    c.execute('SELECT paciente_id FROM pacientes_registro WHERE paciente_id = ?', (paciente_id,))
+    c.execute('SELECT paciente_id FROM pacientes WHERE paciente_id = ?', (paciente_id,))
     existe = c.fetchone()
     
     if existe:
         c.execute('''
-            UPDATE pacientes_registro
+            UPDATE pacientes 
             SET nombre_completo = ?, fecha_ingreso = ?, fecha_nacimiento = ?, sexo = ?, estatus = ?, fecha_modificacion = ?
             WHERE paciente_id = ?
-        ''', (nombre_completo.strip(), str(fecha_ingreso), str(fecha_nacimiento), sexo, estatus, fecha_actual, paciente_id))
+        ''', (nombre_completo, fecha_ingreso, fecha_nacimiento, sexo, estatus, fecha_actual, paciente_id))
     else:
         c.execute('''
-            INSERT INTO pacientes_registro (paciente_id, nombre_completo, fecha_ingreso, fecha_nacimiento, sexo, estatus, fecha_registro, fecha_modificacion, usuario_registro)
+            INSERT INTO pacientes (paciente_id, nombre_completo, fecha_ingreso, fecha_nacimiento, sexo, estatus, fecha_registro, fecha_modificacion, usuario_registro)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (paciente_id, nombre_completo.strip(), str(fecha_ingreso), str(fecha_nacimiento), sexo, estatus, fecha_actual, fecha_actual, usuario))
+        ''', (paciente_id, nombre_completo, fecha_ingreso, fecha_nacimiento, sexo, estatus, fecha_actual, fecha_actual, usuario))
         
     conn.commit()
     conn.close()
@@ -161,31 +129,61 @@ def cambiar_estatus_paciente(paciente_id, nuevo_estatus):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     fecha_actual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    c.execute('UPDATE pacientes_registro SET estatus = ?, fecha_modificacion = ? WHERE paciente_id = ?',
+    c.execute('UPDATE pacientes SET estatus = ?, fecha_modificacion = ? WHERE paciente_id = ?',
               (nuevo_estatus, fecha_actual, paciente_id))
     conn.commit()
     conn.close()
 
-def obtener_paciente_registro(paciente_id):
+def buscar_paciente_por_nombre(nombre):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('SELECT paciente_id, nombre_completo, fecha_ingreso, fecha_nacimiento, sexo, estatus, fecha_registro, fecha_modificacion, usuario_registro FROM pacientes_registro WHERE paciente_id = ?', (paciente_id,))
+    nombre_clean = nombre.strip().lower()
+    c.execute('SELECT paciente_id, nombre_completo, estatus FROM pacientes')
+    rows = c.fetchall()
+    conn.close()
+    for p_id, p_nombre, p_estatus in rows:
+        if p_nombre.strip().lower() == nombre_clean:
+            return p_id, p_nombre, p_estatus
+    return None
+
+def obtener_paciente(paciente_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('SELECT paciente_id, nombre_completo, fecha_ingreso, fecha_nacimiento, sexo, estatus, fecha_registro, fecha_modificacion, usuario_registro FROM pacientes WHERE paciente_id = ?', (paciente_id,))
     row = c.fetchone()
     conn.close()
     return row
 
-def listar_pacientes_registrados(solo_activos=True):
+def listar_pacientes_por_estatus(estatus='A'):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    if solo_activos:
-        c.execute("SELECT paciente_id, nombre_completo, fecha_ingreso, fecha_nacimiento, sexo, estatus, fecha_modificacion FROM pacientes_registro WHERE estatus = 'A' ORDER BY nombre_completo ASC")
+    if estatus == 'TODOS':
+        c.execute('SELECT paciente_id, nombre_completo, fecha_ingreso, fecha_nacimiento, sexo, estatus FROM pacientes ORDER BY nombre_completo ASC')
     else:
-        c.execute("SELECT paciente_id, nombre_completo, fecha_ingreso, fecha_nacimiento, sexo, estatus, fecha_modificacion FROM pacientes_registro ORDER BY estatus ASC, nombre_completo ASC")
+        c.execute('SELECT paciente_id, nombre_completo, fecha_ingreso, fecha_nacimiento, sexo, estatus FROM pacientes WHERE estatus = ? ORDER BY nombre_completo ASC', (estatus,))
     rows = c.fetchall()
     conn.close()
     return rows
 
-# --- FUNCIONES DE ENTREVISTA ---
+def generar_siguiente_folio():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('SELECT paciente_id FROM pacientes')
+    rows = c.fetchall()
+    conn.close()
+    max_num = 0
+    for row in rows:
+        pid = row[0]
+        if pid.startswith("PAC-"):
+            try:
+                num = int(pid.replace("PAC-", ""))
+                if num > max_num:
+                    max_num = num
+            except ValueError:
+                pass
+    return f"PAC-{max_num + 1:03d}"
+
+# --- FUNCIONES ENTREVISTAS ---
 def guardar_entrevista(paciente_id, datos, usuario):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -223,12 +221,17 @@ def obtener_entrevista(paciente_id):
 def listar_entrevistas():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('SELECT paciente_id, fecha_registro, fecha_modificacion, usuario_registro FROM entrevistas ORDER BY fecha_modificacion DESC')
+    c.execute('''
+        SELECT e.paciente_id, p.nombre_completo, e.fecha_registro, e.fecha_modificacion, e.usuario_registro, p.estatus
+        FROM entrevistas e
+        JOIN pacientes p ON e.paciente_id = p.paciente_id
+        ORDER BY e.fecha_modificacion DESC
+    ''')
     rows = c.fetchall()
     conn.close()
     return rows
 
-# --- FUNCIONES DE MEDICAMENTOS ---
+# --- FUNCIONES MEDICAMENTOS ---
 def guardar_medicamentos(paciente_id, meds_list, observaciones, usuario):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -240,10 +243,10 @@ def guardar_medicamentos(paciente_id, meds_list, observaciones, usuario):
     
     if existe:
         c.execute('''
-            UPDATE medicamentos
-            SET meds_json = ?, observaciones = ?, fecha_modificacion = ?
+            UPDATE medicamentos 
+            SET meds_json = ?, observaciones = ?, fecha_modificacion = ?, usuario_registro = ?
             WHERE paciente_id = ?
-        ''', (meds_json, observaciones, fecha_actual, paciente_id))
+        ''', (meds_json, observaciones, fecha_actual, usuario, paciente_id))
     else:
         c.execute('''
             INSERT INTO medicamentos (paciente_id, meds_json, observaciones, fecha_registro, fecha_modificacion, usuario_registro)
@@ -259,58 +262,68 @@ def obtener_medicamentos(paciente_id):
     c.execute('SELECT meds_json, observaciones, fecha_registro, fecha_modificacion, usuario_registro FROM medicamentos WHERE paciente_id = ?', (paciente_id,))
     row = c.fetchone()
     conn.close()
-    if row and row[0]:
+    if row:
         return json.loads(row[0]), row[1], row[2], row[3], row[4]
     return [], "", None, None, None
 
-def listar_todos_medicamentos():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''
-        SELECT m.paciente_id, m.meds_json, m.observaciones, m.fecha_modificacion, p.nombre_completo, p.estatus 
-        FROM medicamentos m
-        LEFT JOIN pacientes_registro p ON m.paciente_id = p.paciente_id
-    ''')
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
-# --- FUNCIONES DE ENTREGA DE MEDICAMENTOS ---
-def registrar_entrega_medicamentos(paciente_id, entregas_list, observaciones, usuario):
+def registrar_entrega_medicamentos(paciente_id, entregas_list, usuario):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     fecha_actual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    entregas_json = json.dumps(entregas_list, ensure_ascii=False)
     
+    # 1. Obtener medicamentos actuales
+    meds_list, obs, f_reg, f_mod, u_reg = obtener_medicamentos(paciente_id)
+    
+    # Map de entregas por nombre
+    entregas_map = {item['nombre']: item['cantidad_entregada'] for item in entregas_list}
+    
+    # 2. Descontar existencias
+    for med in meds_list:
+        m_nombre = med.get('nombre')
+        if m_nombre in entregas_map:
+            cant_desc = int(entregas_map[m_nombre])
+            stock_actual = int(med.get('existencia', 0))
+            nuevo_stock = max(0, stock_actual - cant_desc)
+            med['existencia'] = nuevo_stock
+            
+    # Guardar medicamentos actualizados
+    guardar_medicamentos(paciente_id, meds_list, obs, usuario)
+    
+    # 3. Registrar en historial de entregas
+    entregas_json = json.dumps(entregas_list, ensure_ascii=False)
     c.execute('''
-        INSERT INTO entregas_medicamentos (paciente_id, fecha_entrega, usuario_registro, entregas_json, observaciones)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (paciente_id, fecha_actual, usuario, entregas_json, observaciones))
+        INSERT INTO entregas_meds (paciente_id, fecha_entrega, entregas_json, usuario_registro)
+        VALUES (?, ?, ?, ?)
+    ''', (paciente_id, fecha_actual, entregas_json, usuario))
     
     conn.commit()
     conn.close()
 
-def listar_entregas_paciente(paciente_id):
+def listar_todos_medicamentos_activos():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''
-        SELECT fecha_entrega, usuario_registro, entregas_json, observaciones 
-        FROM entregas_medicamentos 
-        WHERE paciente_id = ? 
-        ORDER BY fecha_entrega DESC
-    ''', (paciente_id,))
+        SELECT m.paciente_id, p.nombre_completo, m.meds_json, m.observaciones, m.fecha_modificacion
+        FROM medicamentos m
+        JOIN pacientes p ON m.paciente_id = p.paciente_id
+        WHERE p.estatus = 'A'
+    ''')
     rows = c.fetchall()
     conn.close()
     return rows
 
 # --- GENERADOR DE PDF ---
 class PDFReport(FPDF):
+    def __init__(self, titulo_reporte="REPORTE CLINICO"):
+        super().__init__()
+        self.titulo_reporte = titulo_reporte
+
     def header(self):
         self.set_font("Helvetica", "B", 14)
-        self.cell(self.epw, 8, "SISTEMA DE ATENCION Y CONTROL CLINICO", border=0, align="C", new_x="LMARGIN", new_y="NEXT")
-        self.set_font("Helvetica", "I", 10)
-        self.cell(self.epw, 6, "Reporte Oficial Expediente de Paciente", border=0, align="C", new_x="LMARGIN", new_y="NEXT")
-        self.ln(4)
+        self.cell(self.epw, 8, self.titulo_reporte, border=0, align="C", new_x="LMARGIN", new_y="NEXT")
+        self.set_font("Helvetica", "I", 9)
+        self.cell(self.epw, 5, "Sistema de Atencion y Control Clinico de Pacientes", border=0, align="C", new_x="LMARGIN", new_y="NEXT")
+        self.ln(3)
 
     def footer(self):
         self.set_y(-15)
@@ -326,38 +339,38 @@ def limpiar_texto(texto):
         'ñ': 'n', 'Ñ': 'N', '¿': '', '¡': ''
     }
     for k, v in replacements.items():
-        texto = texto.replace(k, v)
+        texto = str(texto).replace(k, v)
     return texto
 
-def encabezado_paciente_pdf(pdf, paciente_id):
-    p_info = obtener_paciente_registro(paciente_id)
-    pdf.set_font("Helvetica", "B", 11)
-    if p_info:
-        pdf.cell(pdf.epw, 6, f"FOLIO: {limpiar_texto(p_info[0])}  |  PACIENTE: {limpiar_texto(p_info[1])}", new_x="LMARGIN", new_y="NEXT")
-        pdf.set_font("Helvetica", "", 10)
-        pdf.cell(pdf.epw, 6, f"Fecha Ingreso: {limpiar_texto(p_info[2])} | Fecha Nac.: {limpiar_texto(p_info[3])} | Sexo: {limpiar_texto(p_info[4])}", new_x="LMARGIN", new_y="NEXT")
-    else:
-        pdf.cell(pdf.epw, 6, f"FOLIO PACIENTE: {limpiar_texto(paciente_id)}", new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(3)
+def agregar_encabezado_paciente_pdf(pdf, paciente_data):
+    if paciente_data:
+        p_id, p_nombre, p_ingreso, p_nac, p_sexo = paciente_data[0], paciente_data[1], paciente_data[2], paciente_data[3], paciente_data[4]
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.cell(pdf.epw, 6, f"DATOS DEL PACIENTE", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("Helvetica", "", 9)
+        pdf.cell(pdf.epw, 5, f"Folio: {limpiar_texto(p_id)} | Nombre: {limpiar_texto(p_nombre)}", new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(pdf.epw, 5, f"Fecha Ingreso: {limpiar_texto(p_ingreso)} | Fecha Nacimiento: {limpiar_texto(p_nac)} | Sexo: {limpiar_texto(p_sexo)}", new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(3)
 
 def generar_pdf_entrevista(paciente_id, datos):
-    pdf = PDFReport()
+    p_data = obtener_paciente(paciente_id)
+    pdf = PDFReport("ENTREVISTA INICIAL DE CONSEJERIA")
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
     
-    encabezado_paciente_pdf(pdf, paciente_id)
+    agregar_encabezado_paciente_pdf(pdf, p_data)
     
     # Datos Principales
-    pdf.set_font("Helvetica", "B", 11)
-    pdf.cell(pdf.epw, 7, "ENTREVISTA INICIAL DE CONSEJERIA", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("Helvetica", "", 10)
-    pdf.cell(pdf.epw, 6, f"Dependientes economicos: {limpiar_texto(datos.get('dependientes_flag', ''))} - Quienes: {limpiar_texto(datos.get('dependientes_quienes', ''))}", new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(pdf.epw, 6, f"Tiene pareja: {limpiar_texto(datos.get('pareja_flag', ''))} - Tiempo de relacion: {limpiar_texto(datos.get('pareja_tiempo', ''))}", new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(4)
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.cell(pdf.epw, 6, "DATOS SOCIO-DEMOGRAFICOS BASALES", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 9)
+    pdf.cell(pdf.epw, 5, f"Dependientes economicos: {limpiar_texto(datos.get('dependientes_flag', ''))} - Quienes: {limpiar_texto(datos.get('dependientes_quienes', ''))}", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(pdf.epw, 5, f"Tiene pareja: {limpiar_texto(datos.get('pareja_flag', ''))} - Tiempo de relacion: {limpiar_texto(datos.get('pareja_tiempo', ''))}", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(3)
     
     # Tabla de Consumo
-    pdf.set_font("Helvetica", "B", 11)
-    pdf.cell(pdf.epw, 7, "CONSUMO DE SUSTANCIAS", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.cell(pdf.epw, 6, "CONSUMO DE SUSTANCIAS", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", "B", 8)
     
     col_widths = [28, 20, 25, 30, 28, 22, 37]
@@ -378,15 +391,15 @@ def generar_pdf_entrevista(paciente_id, datos):
         pdf.cell(col_widths[5], 6, limpiar_texto(str(vals.get("edad_inicio", ""))), border=1, align="C")
         pdf.cell(col_widths[6], 6, limpiar_texto(str(vals.get("lugar", ""))), border=1, new_x="LMARGIN", new_y="NEXT")
         
-    pdf.ln(4)
+    pdf.ln(3)
     
     # Sustancia de Impacto
     pdf.set_font("Helvetica", "B", 10)
     pdf.cell(pdf.epw, 6, f"Sustancia de Impacto: {limpiar_texto(datos.get('sustancia_impacto', ''))}", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("Helvetica", "", 10)
-    pdf.cell(pdf.epw, 6, f"Tiempo de consumo excesivo: {limpiar_texto(datos.get('tiempo_excesivo', ''))}", new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(pdf.epw, 6, f"Normalmente consume: {limpiar_texto(datos.get('modo_consumo', ''))}", new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(4)
+    pdf.set_font("Helvetica", "", 9)
+    pdf.cell(pdf.epw, 5, f"Tiempo de consumo excesivo: {limpiar_texto(datos.get('tiempo_excesivo', ''))}", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(pdf.epw, 5, f"Normalmente consume: {limpiar_texto(datos.get('modo_consumo', ''))}", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(3)
     
     # Disposición al Cambio
     pdf.set_font("Helvetica", "B", 10)
@@ -395,8 +408,8 @@ def generar_pdf_entrevista(paciente_id, datos):
     pdf.multi_cell(pdf.epw, 5, f"Mayor periodo de abstinencia: {limpiar_texto(datos.get('abst_mayor_tiempo', ''))} | Fecha: {limpiar_texto(datos.get('abst_fecha', ''))}", new_x="LMARGIN", new_y="NEXT")
     pdf.multi_cell(pdf.epw, 5, f"Motivo / Estrategia de abstinencia: {limpiar_texto(datos.get('abst_motivo', ''))}", new_x="LMARGIN", new_y="NEXT")
     pdf.multi_cell(pdf.epw, 5, f"Abstinencia ultimos 6 meses: {limpiar_texto(datos.get('abst_6meses', ''))}", new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(pdf.epw, 6, f"Importancia actual de dejar de consumir (1-5): {limpiar_texto(datos.get('importancia_cambio', ''))}", new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(4)
+    pdf.cell(pdf.epw, 5, f"Importancia actual de dejar de consumir (1-5): {limpiar_texto(datos.get('importancia_cambio', ''))}", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(3)
     
     # Observaciones y Firma
     pdf.set_font("Helvetica", "B", 10)
@@ -404,129 +417,117 @@ def generar_pdf_entrevista(paciente_id, datos):
     pdf.set_font("Helvetica", "", 9)
     pdf.multi_cell(pdf.epw, 5, f"Problemas durante la sesion: {limpiar_texto(datos.get('problemas_sesion', ''))}", new_x="LMARGIN", new_y="NEXT")
     pdf.multi_cell(pdf.epw, 5, f"Observaciones generales: {limpiar_texto(datos.get('observaciones', ''))}", new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(8)
+    pdf.ln(6)
     
-    # Firma
     pdf.set_font("Helvetica", "B", 9)
-    pdf.cell(pdf.epw, 5, f"Nombre de quien aplica: {limpiar_texto(datos.get('evaluador_nombre', ''))}", new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(pdf.epw, 5, f"Cargo: {limpiar_texto(datos.get('evaluador_cargo', ''))}", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(pdf.epw, 5, f"Evaluador: {limpiar_texto(datos.get('evaluador_nombre', ''))} ({limpiar_texto(datos.get('evaluador_cargo', ''))})", new_x="LMARGIN", new_y="NEXT")
     
     pdf_filename = f"Entrevista_Paciente_{paciente_id}.pdf"
     pdf.output(pdf_filename)
     return pdf_filename
 
 def generar_pdf_medicamentos(paciente_id, meds_list, observaciones):
-    pdf = PDFReport()
+    p_data = obtener_paciente(paciente_id)
+    pdf = PDFReport("HOJA DE CONTROL DE MEDICAMENTOS Y DOSIS")
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
     
-    encabezado_paciente_pdf(pdf, paciente_id)
+    agregar_encabezado_paciente_pdf(pdf, p_data)
     
-    pdf.set_font("Helvetica", "B", 12)
-    pdf.cell(pdf.epw, 7, "ESQUEMA Y CONTROL DE MEDICAMENTOS", new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(3)
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.cell(pdf.epw, 6, "ESQUEMA DE DOSIFICACION DIARIA Y EXISTENCIAS", new_x="LMARGIN", new_y="NEXT")
     
-    pdf.set_font("Helvetica", "B", 9)
-    col_w = [45, 20, 20, 20, 22, 25, 38]
-    headers = ["Medicamento", "Manana", "Tarde", "Noche", "Dosis D.", "Existencia", "Indicaciones"]
+    col_w = [45, 20, 20, 20, 25, 60]
+    headers = ["Medicamento", "Manana", "Tarde", "Noche", "Existencia", "Indicaciones"]
     
+    pdf.set_font("Helvetica", "B", 8)
     for i, h in enumerate(headers):
         pdf.cell(col_w[i], 6, h, border=1, align="C")
     pdf.ln()
     
     pdf.set_font("Helvetica", "", 8)
     for m in meds_list:
-        dm = float(m.get('dosis_manana', 0))
-        dt = float(m.get('dosis_tarde', 0))
-        dn = float(m.get('dosis_noche', 0))
-        d_diaria = dm + dt + dn
-        ex = float(m.get('existencia', 0))
-        
         pdf.cell(col_w[0], 6, limpiar_texto(m.get('nombre', '')), border=1)
-        pdf.cell(col_w[1], 6, str(dm), border=1, align="C")
-        pdf.cell(col_w[2], 6, str(dt), border=1, align="C")
-        pdf.cell(col_w[3], 6, str(dn), border=1, align="C")
-        pdf.cell(col_w[4], 6, str(d_diaria), border=1, align="C")
-        pdf.cell(col_w[5], 6, str(ex), border=1, align="C")
-        pdf.cell(col_w[6], 6, limpiar_texto(m.get('indicaciones', '')), border=1, new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(col_w[1], 6, str(m.get('dosis_manana', 0)), border=1, align="C")
+        pdf.cell(col_w[2], 6, str(m.get('dosis_tarde', 0)), border=1, align="C")
+        pdf.cell(col_w[3], 6, str(m.get('dosis_noche', 0)), border=1, align="C")
+        pdf.cell(col_w[4], 6, str(m.get('existencia', 0)), border=1, align="C")
+        pdf.cell(col_w[5], 6, limpiar_texto(m.get('indicaciones', '')), border=1, new_x="LMARGIN", new_y="NEXT")
         
     pdf.ln(4)
-    pdf.set_font("Helvetica", "B", 10)
-    pdf.cell(pdf.epw, 6, "Observaciones de la Medicacion:", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("Helvetica", "", 9)
-    pdf.multi_cell(pdf.epw, 5, limpiar_texto(observaciones if observaciones else "Sin observaciones registrado."), new_x="LMARGIN", new_y="NEXT")
-    
+    if observaciones:
+        pdf.set_font("Helvetica", "B", 9)
+        pdf.cell(pdf.epw, 5, "Observaciones y Contraindicaciones:", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("Helvetica", "", 9)
+        pdf.multi_cell(pdf.epw, 5, limpiar_texto(observaciones), new_x="LMARGIN", new_y="NEXT")
+        
     pdf_filename = f"Medicacion_Paciente_{paciente_id}.pdf"
     pdf.output(pdf_filename)
     return pdf_filename
 
-def generar_pdf_comprobante_entrega(paciente_id, entregas_list, observaciones):
-    pdf = PDFReport()
+def generar_pdf_entrega(paciente_id, entregas_list, usuario):
+    p_data = obtener_paciente(paciente_id)
+    pdf = PDFReport("COMPROBANTE DE ENTREGA DE MEDICAMENTOS")
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
     
-    encabezado_paciente_pdf(pdf, paciente_id)
+    agregar_encabezado_paciente_pdf(pdf, p_data)
     
-    pdf.set_font("Helvetica", "B", 12)
-    pdf.cell(pdf.epw, 7, "COMPROBANTE DE ENTREGA DE MEDICAMENTOS", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("Helvetica", "", 9)
-    pdf.cell(pdf.epw, 5, f"Fecha de Entrega: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", new_x="LMARGIN", new_y="NEXT")
+    fecha_actual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    pdf.set_font("Helvetica", "I", 9)
+    pdf.cell(pdf.epw, 5, f"Fecha de Entrega: {fecha_actual} | Entregado por: {limpiar_texto(usuario)}", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(3)
     
-    pdf.set_font("Helvetica", "B", 9)
-    col_w = [60, 35, 45, 50]
-    headers = ["Medicamento", "Cant. Entregada", "Stock Anterior", "Stock Restante"]
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.cell(pdf.epw, 6, "DETALLE DE MEDICAMENTOS ENTREGADOS", new_x="LMARGIN", new_y="NEXT")
     
+    col_w = [70, 45, 45, 30]
+    headers = ["Medicamento", "Cantidad Entregada", "Stock Restante", "Estatus"]
+    
+    pdf.set_font("Helvetica", "B", 8)
     for i, h in enumerate(headers):
         pdf.cell(col_w[i], 6, h, border=1, align="C")
     pdf.ln()
     
-    pdf.set_font("Helvetica", "", 9)
+    pdf.set_font("Helvetica", "", 8)
     for item in entregas_list:
         pdf.cell(col_w[0], 6, limpiar_texto(item.get('nombre', '')), border=1)
         pdf.cell(col_w[1], 6, str(item.get('cantidad_entregada', 0)), border=1, align="C")
-        pdf.cell(col_w[2], 6, str(item.get('existencia_previa', 0)), border=1, align="C")
-        pdf.cell(col_w[3], 6, str(item.get('existencia_nueva', 0)), border=1, align="C", new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(col_w[2], 6, str(item.get('stock_restante', 0)), border=1, align="C")
+        pdf.cell(col_w[3], 6, "ENTREGADO", border=1, align="C", new_x="LMARGIN", new_y="NEXT")
         
-    pdf.ln(4)
-    if observaciones:
-        pdf.set_font("Helvetica", "B", 10)
-        pdf.cell(pdf.epw, 6, "Notas de Entrega:", new_x="LMARGIN", new_y="NEXT")
-        pdf.set_font("Helvetica", "", 9)
-        pdf.multi_cell(pdf.epw, 5, limpiar_texto(observaciones), new_x="LMARGIN", new_y="NEXT")
-        
-    pdf.ln(10)
+    pdf.ln(12)
     pdf.set_font("Helvetica", "B", 9)
-    pdf.cell(pdf.epw, 5, "Firma del Recibido / Entregado: ___________________________", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(pdf.epw, 5, "________________________________________", align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(pdf.epw, 5, "Firma de Recibido / Conformidad Paciente", align="C", new_x="LMARGIN", new_y="NEXT")
     
-    pdf_filename = f"Comprobante_Entrega_{paciente_id}.pdf"
+    pdf_filename = f"Entrega_Meds_{paciente_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
     pdf.output(pdf_filename)
     return pdf_filename
 
 def generar_pdf_compras(lista_compras):
-    pdf = PDFReport()
+    pdf = PDFReport("LISTA DE COMPRAS Y REABASTECIMIENTO DE MEDICAMENTOS")
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
     
-    pdf.set_font("Helvetica", "B", 12)
-    pdf.cell(pdf.epw, 7, "LISTA DE COMPRAS Y REABASTECIMIENTO DE MEDICAMENTOS", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("Helvetica", "", 9)
-    pdf.cell(pdf.epw, 5, f"Fecha de Generación: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(4)
+    fecha_actual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    pdf.set_font("Helvetica", "I", 9)
+    pdf.cell(pdf.epw, 5, f"Fecha de Generacion: {fecha_actual}", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(3)
+    
+    col_w = [25, 45, 45, 25, 25, 25]
+    headers = ["Folio", "Paciente", "Medicamento", "Stock", "Dosis Diaria", "Sugerido"]
     
     pdf.set_font("Helvetica", "B", 8)
-    col_w = [25, 45, 40, 25, 25, 30]
-    headers = ["Folio", "Paciente", "Medicamento", "Existencia", "Dosis Diaria", "Sugerido Compra"]
-    
     for i, h in enumerate(headers):
         pdf.cell(col_w[i], 6, h, border=1, align="C")
     pdf.ln()
     
     pdf.set_font("Helvetica", "", 8)
     for item in lista_compras:
-        pdf.cell(col_w[0], 6, limpiar_texto(item['folio']), border=1)
-        pdf.cell(col_w[1], 6, limpiar_texto(item['paciente']), border=1)
-        pdf.cell(col_w[2], 6, limpiar_texto(item['medicamento']), border=1)
+        pdf.cell(col_w[0], 6, limpiar_texto(item['paciente_id']), border=1)
+        pdf.cell(col_w[1], 6, limpiar_texto(item['paciente_nombre']), border=1)
+        pdf.cell(col_w[2], 6, limpiar_texto(item['med_nombre']), border=1)
         pdf.cell(col_w[3], 6, str(item['existencia']), border=1, align="C")
         pdf.cell(col_w[4], 6, str(item['dosis_diaria']), border=1, align="C")
         pdf.cell(col_w[5], 6, str(item['sugerido_compra']), border=1, align="C", new_x="LMARGIN", new_y="NEXT")
@@ -547,7 +548,7 @@ if "nombre_completo" not in st.session_state:
 
 # --- PANTALLA DE LOGIN ---
 if not st.session_state["logged_in"]:
-    st.markdown("<h2 style='text-align: center;'>🔐 Acceso al Sistema Clinico y Consejería</h2>", unsafe_allow_html=True)
+    st.markdown("<h2 style='text-align: center;'>🔐 Acceso al Sistema Clinico</h2>", unsafe_allow_html=True)
     st.markdown("<p style='text-align: center; color: gray;'>Ingrese sus credenciales para continuar</p>", unsafe_allow_html=True)
     
     col1, col2, col3 = st.columns([1, 2, 1])
@@ -571,11 +572,11 @@ if not st.session_state["logged_in"]:
 
 else:
     # --- BARRA LATERAL ---
-    st.sidebar.title("📋 Control Clínico")
-    st.sidebar.write(f"👤 **Atiende**: {st.session_state['nombre_completo']}")
+    st.sidebar.title("📋 Control Clinico")
+    st.sidebar.write(f"👤 **Usuario**: {st.session_state['nombre_completo']}")
     
     menu = st.sidebar.radio(
-        "Navegación principal",
+        "Navegación",
         [
             "👤 Registro de Usuarios",
             "📝 Nueva Entrevista / Editar",
@@ -591,10 +592,10 @@ else:
         st.session_state["logged_in"] = False
         st.rerun()
 
-    # --- SECCIÓN 0: REGISTRO DE USUARIOS (PACIENTES) ---
+    # --- SECCIÓN 0: REGISTRO DE USUARIOS / PACIENTES ---
     if menu == "👤 Registro de Usuarios":
-        st.title("👤 Registro Inicial de Usuarios (Pacientes)")
-        st.caption("Modulo inicial obligatorio para dar de alta pacientes en la base de datos")
+        st.title("👤 Registro General de Usuarios / Pacientes")
+        st.caption("Modulo inicial para la alta y gestion de expedientes de usuarios")
         
         tab_alta, tab_activos, tab_bloqueados = st.tabs([
             "➕ Alta de Nuevo Usuario",
@@ -603,104 +604,102 @@ else:
         ])
         
         with tab_alta:
-            st.subheader("Datos Basales Obligatorios")
+            st.subheader("Datos de Registro de Usuario")
             folio_sugerido = generar_siguiente_folio()
             
-            with st.form("form_alta_usuario"):
-                col_u1, col_u2 = st.columns(2)
-                with col_u1:
-                    pac_id_in = st.text_input("🔑 Folio / ID del Usuario *", value=folio_sugerido).strip()
-                    nombre_in = st.text_input("👤 Nombre Completo del Usuario *").strip()
-                with col_u2:
-                    fecha_ing = st.date_input("📅 Fecha de Ingreso *", datetime.now())
-                    fecha_nac = st.date_input("🎂 Fecha de Nacimiento *", datetime(1995, 1, 1))
-                    sexo_in = st.selectbox("🚻 Sexo *", ["Masculino", "Femenino", "Otro"])
-                    
-                btn_alta = st.form_submit_button("💾 Guardar y Dar de Alta Usuario", use_container_width=True)
+            with st.form("form_alta_paciente"):
+                c_a1, c_a2 = st.columns(2)
+                with c_a1:
+                    reg_id = st.text_input("🔑 Folio / ID de Usuario *", value=folio_sugerido).strip()
+                    reg_nombre = st.text_input("👤 Nombre Completo *", placeholder="Ej. Augusto Lara").strip()
+                with c_a2:
+                    reg_f_ingreso = st.date_input("📅 Fecha de Ingreso", value=date.today())
+                    reg_f_nacimiento = st.date_input(
+                        "🎂 Fecha de Nacimiento",
+                        value=date(1990, 1, 1),
+                        min_value=date(1920, 1, 1),
+                        max_value=date.today()
+                    )
+                    reg_sexo = st.selectbox("🚻 Sexo", ["Masculino", "Femenino", "Otro"])
                 
-                if btn_alta:
-                    if not pac_id_in or not nombre_in:
-                        st.error("⚠️ El Folio y el Nombre Completo son campos obligatorios.")
+                btn_reg_paciente = st.form_submit_button("💾 Dar de Alta Usuario", use_container_width=True)
+                
+                if btn_reg_paciente:
+                    if not reg_id or not reg_nombre:
+                        st.error("⚠️ El Folio/ID y el Nombre Completo son campos obligatorios.")
                     else:
-                        # Verificar duplicados insensibles a mayúsculas en 'A' y 'B'
-                        duplicado = buscar_duplicado_nombre(nombre_in)
-                        if duplicado and duplicado[0] != pac_id_in:
-                            p_exist_id, p_exist_nom, p_exist_est = duplicado
-                            est_txt = "ACTIVO ('A')" if p_exist_est == 'A' else "BLOQUEADO ('B')"
-                            st.error(f"❌ **Imposible registrar**: Ya existe un usuario registrado con el nombre **'{p_exist_nom}'** bajo el Folio **{p_exist_id}** (Estatus actual: **{est_txt}**). No se permiten registros duplicados.")
+                        # Validar si existe duplicado por nombre (insensible a mayusculas)
+                        existente_nombre = buscar_paciente_por_nombre(reg_nombre)
+                        if existente_nombre and existente_nombre[0] != reg_id:
+                            p_id_ex, p_nom_ex, p_est_ex = existente_nombre
+                            est_txt = "ACTIVO ('A')" if p_est_ex == 'A' else "BLOQUEADO ('B')"
+                            st.error(f"❌ Imposible registrar: Ya existe un usuario registrado con el nombre '{p_nom_ex}' bajo el Folio **{p_id_ex}** (Estatus actual: {est_txt}). No se permiten registros duplicados.")
                         else:
-                            guardar_paciente_registro(pac_id_in, nombre_in, fecha_ing, fecha_nac, sexo_in, estatus='A', usuario=st.session_state['username'])
-                            st.success(f"✅ ¡Usuario **{nombre_in}** con Folio **{pac_id_in}** dado de alta correctamente!")
-                            st.rerun()
+                            guardar_paciente(
+                                reg_id,
+                                reg_nombre,
+                                reg_f_ingreso.strftime("%Y-%m-%d"),
+                                reg_f_nacimiento.strftime("%Y-%m-%d"),
+                                reg_sexo,
+                                st.session_state["username"],
+                                estatus='A'
+                            )
+                            st.success(f"✅ Usuario **{reg_nombre}** (Folio: {reg_id}) registrado exitosamente con estatus ACTIVO ('A').")
 
         with tab_activos:
-            st.subheader("🟢 Lista de Usuarios Activos ('A')")
-            activos = listar_pacientes_registrados(solo_activos=True)
-            if not activos:
+            st.subheader("🟢 Directorio de Usuarios Activos")
+            pacientes_activos = listar_pacientes_por_estatus('A')
+            if not pacientes_activos:
                 st.info("No hay usuarios activos registrados.")
             else:
-                for reg in activos:
-                    pid, pnom, fing, fnac, psex, pest, fmod = reg
-                    with st.expander(f"👤 **{pnom}** | Folio: `{pid}` | Sexo: {psex} | Ingreso: {fing}"):
-                        c_a1, c_a2 = st.columns([3, 1])
-                        with c_a1:
-                            st.write(f"**Fecha Nacimiento:** {fnac}")
-                            st.write(f"**Última Modificación:** {fmod}")
-                        with c_a2:
-                            if st.button(f"🔒 Bloquear Usuario", key=f"btn_bloq_{pid}"):
-                                cambiar_estatus_paciente(pid, 'B')
-                                st.warning(f"Usuario {pid} - {pnom} ha sido Bloqueado ('B').")
-                                st.rerun()
+                for p in pacientes_activos:
+                    p_id, p_nom, p_ing, p_nac, p_sex, p_est = p
+                    with st.expander(f"👤 **{p_nom}** | Folio: **{p_id}** | Sexo: {p_sex}"):
+                        st.write(f"**Fecha de Ingreso:** {p_ing} | **Fecha de Nacimiento:** {p_nac}")
+                        if st.button(f"🔒 Bloquear Usuario ({p_id})", key=f"block_{p_id}"):
+                            cambiar_estatus_paciente(p_id, 'B')
+                            st.warning(f"Usuario {p_id} ({p_nom}) ha sido cambiado a estatus BLOQUEADO ('B').")
+                            st.rerun()
 
         with tab_bloqueados:
-            st.subheader("🔒 Lista de Usuarios Bloqueados ('B')")
-            conn = sqlite3.connect(DB_FILE)
-            c = conn.cursor()
-            c.execute("SELECT paciente_id, nombre_completo, fecha_ingreso, fecha_nacimiento, sexo, estatus, fecha_modificacion FROM pacientes_registro WHERE estatus = 'B' ORDER BY nombre_completo ASC")
-            bloqueados = c.fetchall()
-            conn.close()
-            
-            if not bloqueados:
-                st.info("No hay usuarios bloqueados actualmente.")
+            st.subheader("🔒 Usuarios Bloqueados / Inactivos")
+            pacientes_bloqueados = listar_pacientes_por_estatus('B')
+            if not pacientes_bloqueados:
+                st.info("No hay usuarios bloqueados en el sistema.")
             else:
-                for reg in bloqueados:
-                    pid, pnom, fing, fnac, psex, pest, fmod = reg
-                    with st.expander(f"🔒 **{pnom}** | Folio: `{pid}` [BLOQUEADO]"):
-                        c_b1, c_b2 = st.columns([3, 1])
-                        with c_b1:
-                            st.write(f"**Fecha Ingreso:** {fing} | **Nacimiento:** {fnac}")
-                            st.write(f"**Última Modificación:** {fmod}")
-                        with c_b2:
-                            if st.button(f"🔓 Desbloquear / Reactivar", key=f"btn_unbloq_{pid}"):
-                                cambiar_estatus_paciente(pid, 'A')
-                                st.success(f"Usuario {pid} - {pnom} ha sido Reactivado ('A').")
-                                st.rerun()
+                for p in pacientes_bloqueados:
+                    p_id, p_nom, p_ing, p_nac, p_sex, p_est = p
+                    with st.expander(f"🔒 **{p_nom}** | Folio: **{p_id}** | Sexo: {p_sex}"):
+                        st.write(f"**Fecha de Ingreso:** {p_ing} | **Fecha de Nacimiento:** {p_nac}")
+                        if st.button(f"🟢 Reactivar / Desbloquear Usuario ({p_id})", key=f"unblock_{p_id}"):
+                            cambiar_estatus_paciente(p_id, 'A')
+                            st.success(f"Usuario {p_id} ({p_nom}) ha sido reactivado a estatus ACTIVO ('A').")
+                            st.rerun()
 
     # --- SECCIÓN 1: FORMULARIO DE ENTREVISTA ---
     elif menu == "📝 Nueva Entrevista / Editar":
         st.title("📋 Entrevista Inicial de Consejería")
-        st.caption("Formulario de evaluación digital de consumo de sustancias")
+        st.caption("Formulario de evaluacion digital de consumo de sustancias")
         
-        activos = listar_pacientes_registrados(solo_activos=True)
-        if not activos:
-            st.warning("⚠️ No hay usuarios activos en el sistema. Primero dé de alta un usuario en '👤 Registro de Usuarios'.")
+        pacientes_activos = listar_pacientes_por_estatus('A')
+        if not pacientes_activos:
+            st.warning("⚠️ No hay usuarios activos en el sistema. Vaya al modulo '👤 Registro de Usuarios' para dar de alta uno primero.")
         else:
-            opciones_pacientes = {f"{r[0]} - {r[1]}": r[0] for r in activos}
-            selected_paciente_label = st.selectbox("👤 Seleccionar Paciente Registrado (Activo) *", list(opciones_pacientes.keys()))
-            paciente_id_input = opciones_pacientes[selected_paciente_label]
+            opciones_pacientes = {f"{p[1]} (Folio: {p[0]})": p[0] for p in pacientes_activos}
+            paciente_sel_label = st.selectbox("🔑 Seleccionar Usuario / Paciente Activo *", list(opciones_pacientes.keys()))
+            paciente_id_input = opciones_pacientes[paciente_sel_label]
             
-            p_info = obtener_paciente_registro(paciente_id_input)
+            p_info = obtener_paciente(paciente_id_input)
             if p_info:
-                st.info(f"📌 **Expediente del Paciente**: Folio: `{p_info[0]}` | Nombre: **{p_info[1]}** | Ingreso: {p_info[2]} | Nacimiento: {p_info[3]} | Sexo: {p_info[4]}")
-            
+                st.info(f"📌 **Paciente**: {p_info[1]} | **Folio**: {p_info[0]} | **Ingreso**: {p_info[2]} | **F. Nac**: {p_info[3]} | **Sexo**: {p_info[4]}")
+
             datos_existentes = {}
-            if paciente_id_input:
-                datos_cargados, f_reg, f_mod, u_reg = obtener_entrevista(paciente_id_input)
-                if datos_cargados:
-                    st.success(f"📌 Entrevista encontrada. Registrada el {f_reg} por {u_reg}. Última modificación: {f_mod}")
-                    datos_existentes = datos_cargados
-                else:
-                    st.info("🆕 El paciente no tiene entrevista guardada aún. Complete el formulario a continuación.")
+            datos_cargados, f_reg, f_mod, u_reg = obtener_entrevista(paciente_id_input)
+            if datos_cargados:
+                st.success(f"📌 Expediente cargado. Registrado el {f_reg} por {u_reg}. Ultima modificacion: {f_mod}")
+                datos_existentes = datos_cargados
+            else:
+                st.info("🆕 Folio nuevo. Complete los datos para registrar la entrevista inicial.")
 
             with st.form("formulario_entrevista"):
                 tab1, tab2, tab3, tab4, tab5 = st.tabs([
@@ -711,7 +710,6 @@ else:
                     "5. Observaciones y Firma"
                 ])
                 
-                # TAB 1: DATOS GENERALES
                 with tab1:
                     st.subheader("Datos Socio-Demográficos Basales")
                     c1, c2 = st.columns(2)
@@ -724,11 +722,9 @@ else:
                                                    index=1 if datos_existentes.get("pareja_flag") == "SÍ" else 0)
                         pareja_tiempo = st.text_input("Tiempo de relación", value=datos_existentes.get("pareja_tiempo", ""))
 
-                # TAB 2: CONSUMO DE SUSTANCIAS
                 with tab2:
                     st.subheader("Tabla de Consumo de Sustancias")
                     sustancias_lista = ["ALCOHOL", "CANNABIS", "COCAÍNA", "METANFETAMINA", "ALUCINÓGENOS", "INHALABLES", "TABACO"]
-                    
                     tabla_consumo_guardada = datos_existentes.get("tabla_consumo", {})
                     tabla_consumo_input = {}
                     
@@ -770,52 +766,41 @@ else:
                         modo_consumo = st.selectbox("Normally consume:", ["SOLO", "ACOMPAÑADO", "AMBOS"],
                                                    index=["SOLO", "ACOMPAÑADO", "AMBOS"].index(datos_existentes.get("modo_consumo", "SOLO")) if datos_existentes.get("modo_consumo") in ["SOLO", "ACOMPAÑADO", "AMBOS"] else 0)
 
-                # TAB 3: DISPOSICIÓN AL CAMBIO
                 with tab3:
                     st.subheader("Evaluación de la Disposición al Cambio")
-                    abst_mayor_tiempo = st.text_area("Mayor periodo de abstinencia logrado", value=datos_existentes.get("abst_mayor_tiempo", ""))
-                    abst_fecha = st.text_input("¿Cuándo ocurrió?", value=datos_existentes.get("abst_fecha", ""))
-                    abst_motivo = st.text_area("¿Por qué se abstuvo y qué hizo?", value=datos_existentes.get("abst_motivo", ""))
-                    abst_6meses = st.text_area("Mayor periodo en últimos 6 meses", value=datos_existentes.get("abst_6meses", ""))
+                    abst_mayor_tiempo = st.text_area("Mayor periodo de abstinencia logrado (Si nunca se ha abstenido marque 0)", value=datos_existentes.get("abst_mayor_tiempo", ""))
+                    abst_fecha = st.text_input("¿Cuándo ocurrió? (Mes y Año)", value=datos_existentes.get("abst_fecha", ""))
+                    abst_motivo = st.text_area("¿Por qué se abstuvo en esa ocasión y qué hizo para mantenerse?", value=datos_existentes.get("abst_motivo", ""))
+                    abst_6meses = st.text_area("En los últimos 6 meses, ¿cuánto es el mayor periodo sin consumir y cuándo ocurrió?", value=datos_existentes.get("abst_6meses", ""))
                     
-                    importancia_options = [
-                        "1. NADA IMPORTANTE",
-                        "2. POCO IMPORTANTE",
-                        "3. ALGO IMPORTANTE",
-                        "4. IMPORTANTE",
-                        "5. MUY IMPORTANTE"
-                    ]
+                    importancia_options = ["1. NADA IMPORTANTE", "2. POCO IMPORTANTE", "3. ALGO IMPORTANTE", "4. IMPORTANTE", "5. MUY IMPORTANTE"]
                     imp_saved = datos_existentes.get("importancia_cambio", "3. ALGO IMPORTANTE")
                     imp_index = importancia_options.index(imp_saved) if imp_saved in importancia_options else 2
-                    importancia_cambio = st.select_slider("Importancia de dejar de consumir", options=importancia_options, value=importancia_options[imp_index])
+                    importancia_cambio = st.select_slider("Actualmente, ¿qué tan importante es para usted dejar de consumir?", options=importancia_options, value=importancia_options[imp_index])
 
-                # TAB 4: ENTORNO Y RIESGOS
                 with tab4:
                     st.subheader("Situación Social-Familiar")
-                    familia_integrantes = st.text_area("Integrantes de la familia con mayor contacto", value=datos_existentes.get("familia_integrantes", ""))
-                    
+                    familia_integrantes = st.text_area("¿Quiénes integran su familia (con la que tiene mayor contacto)?", value=datos_existentes.get("familia_integrantes", ""))
                     st.subheader("Factores de Riesgo")
                     c_r1, c_r2 = st.columns(2)
                     with c_r1:
-                        relaciones_post_consumo = st.selectbox("¿Relaciones sexuales tras consumir?", ["NO", "SÍ"],
+                        relaciones_post_consumo = st.selectbox("¿Ha tenido relaciones sexuales después de consumir?", ["NO", "SÍ"],
                                                                 index=1 if datos_existentes.get("relaciones_post_consumo") == "SÍ" else 0)
                     with c_r2:
-                        abuso_flag = st.selectbox("¿Involucrado en abuso físico/sexual por consumo?", ["NO", "SÍ"],
+                        abuso_flag = st.selectbox("¿Se ha visto involucrado en abuso físico o sexual por el consumo?", ["NO", "SÍ"],
                                                   index=1 if datos_existentes.get("abuso_flag") == "SÍ" else 0)
 
-                # TAB 5: OBSERVACIONES Y FIRMA
                 with tab5:
                     st.subheader("Evaluación Clínica y Cierre")
-                    problemas_sesion = st.text_area("Problemas durante la sesión", value=datos_existentes.get("problemas_sesion", ""))
+                    problemas_sesion = st.text_area("Problemas presentados durante la sesión", value=datos_existentes.get("problemas_sesion", ""))
                     observaciones = st.text_area("Observaciones Generales", value=datos_existentes.get("observaciones", ""))
-                    
                     c_f1, c_f2 = st.columns(2)
                     with c_f1:
-                        evaluador_nombre = st.text_input("Nombre de quien aplica la entrevista", value=datos_existentes.get("evaluador_nombre", st.session_state["nombre_completo"]))
+                        evaluador_nombre = st.text_input("Nombre de quien aplica", value=datos_existentes.get("evaluador_nombre", st.session_state["nombre_completo"]))
                     with c_f2:
                         evaluador_cargo = st.text_input("Cargo del evaluador", value=datos_existentes.get("evaluador_cargo", "Consejero / Evaluador Clínico"))
 
-                guardar_btn = st.form_submit_button("💾 Guardar Entrevista del Paciente", use_container_width=True)
+                guardar_btn = st.form_submit_button("💾 Guardar Expediente de Paciente", use_container_width=True)
                 
                 if guardar_btn:
                     datos_completos = {
@@ -840,359 +825,315 @@ else:
                         "evaluador_nombre": evaluador_nombre,
                         "evaluador_cargo": evaluador_cargo
                     }
-                    
                     guardar_entrevista(paciente_id_input, datos_completos, st.session_state["username"])
-                    st.success(f"✅ ¡Entrevista guardada correctamente para el paciente {p_info[1]} ({paciente_id_input})!")
+                    st.success(f"✅ ¡Expediente {paciente_id_input} guardado correctamente en la base de datos!")
 
     # --- SECCIÓN 2: CONTROL DE MEDICAMENTOS Y DOSIS ---
     elif menu == "💊 Control de Medicamentos y Dosis":
-        st.title("💊 Control de Medicamentos, Dosis y Existencias")
-        st.caption("Captura de esquema de dosificación e inventario inicial por paciente")
+        st.title("💊 Control e Inventario de Medicamentos por Paciente")
+        st.caption("Gestion de dosificacion diaria y existencias en farmacia por usuario")
         
-        activos = listar_pacientes_registrados(solo_activos=True)
-        if not activos:
-            st.warning("⚠️ No hay usuarios activos en el sistema. Primero dé de alta un usuario en '👤 Registro de Usuarios'.")
+        pacientes_activos = listar_pacientes_por_estatus('A')
+        if not pacientes_activos:
+            st.warning("⚠️ No hay usuarios activos en el sistema.")
         else:
-            opciones_pacientes = {f"{r[0]} - {r[1]}": r[0] for r in activos}
-            selected_paciente_m_label = st.selectbox("👤 Seleccionar Paciente Registrado (Activo) *", list(opciones_pacientes.keys()))
-            paciente_med_id = opciones_pacientes[selected_paciente_m_label]
+            opciones_pacientes = {f"{p[1]} (Folio: {p[0]})": p[0] for p in pacientes_activos}
+            paciente_med_label = st.selectbox("🔑 Seleccionar Usuario / Paciente Activo *", list(opciones_pacientes.keys()))
+            paciente_med_id = opciones_pacientes[paciente_med_label]
             
-            p_info = obtener_paciente_registro(paciente_med_id)
+            p_info = obtener_paciente(paciente_med_id)
             if p_info:
-                st.info(f"📌 **Paciente Seleccionado**: Folio: `{p_info[0]}` | Nombre: **{p_info[1]}** | Ingreso: {p_info[2]}")
-            
-            meds_cargados, obs_cargadas, f_reg_m, f_mod_m, u_reg_m = obtener_medicamentos(paciente_med_id)
-            if f_mod_m:
-                st.success(f"📌 Registro de medicamentos cargado. Última actualización: {f_mod_m} por {u_reg_m}")
-            
-            st.subheader("Captura de Medicamentos")
-            
-            # Gestionar dinamismo de la lista de medicamentos
-            if f"num_meds_{paciente_med_id}" not in st.session_state:
-                st.session_state[f"num_meds_{paciente_med_id}"] = max(len(meds_cargados), 1)
-            
-            col_b1, col_b2 = st.columns(2)
-            with col_b1:
-                if st.button("➕ Agregar otro medicamento"):
-                    st.session_state[f"num_meds_{paciente_med_id}"] += 1
-                    st.rerun()
-            with col_b2:
-                if st.session_state[f"num_meds_{paciente_med_id}"] > 1:
-                    if st.button("➖ Quitar último medicamento"):
-                        st.session_state[f"num_meds_{paciente_med_id}"] -= 1
-                        st.rerun()
+                st.info(f"📌 **Paciente**: {p_info[1]} | **Folio**: {p_info[0]} | **Ingreso**: {p_info[2]} | **F. Nac**: {p_info[3]} | **Sexo**: {p_info[4]}")
 
-            with st.form("form_medicamentos_paciente"):
+            meds_cargados, obs_cargadas, f_reg_m, f_mod_m, u_reg_m = obtener_medicamentos(paciente_med_id)
+            if meds_cargados:
+                st.success(f"📌 Esquema de medicamentos cargado. Ultima modificacion: {f_mod_m} por {u_reg_m}")
+
+            # Manejo dinamico de filas de medicamentos
+            num_meds = st.number_input("Número de medicamentos a asignar", min_value=1, max_value=15, value=max(1, len(meds_cargados)))
+            
+            with st.form("form_medicamentos"):
                 meds_input = []
-                count_m = st.session_state[f"num_meds_{paciente_med_id}"]
-                
-                for idx in range(count_m):
-                    m_data = meds_cargados[idx] if idx < len(meds_cargados) else {}
-                    st.markdown(f"##### 💊 Medicamento #{idx + 1}")
+                for i in range(int(num_meds)):
+                    m_data = meds_cargados[i] if i < len(meds_cargados) else {}
+                    st.markdown(f"##### 💊 Medicamento #{i+1}")
+                    col_m1, col_m2, col_m3, col_m4, col_m5, col_m6 = st.columns([2.5, 1, 1, 1, 1.2, 2.5])
                     
-                    c_m1, c_m2, c_m3, c_m4, c_m5, c_m6 = st.columns([2.5, 1, 1, 1, 1.2, 2.3])
+                    with col_m1:
+                        nombre_m = st.text_input(f"Nombre del Medicamento", value=m_data.get("nombre", ""), key=f"med_nom_{i}")
+                    with col_m2:
+                        dosis_m = st.number_input(f"☀️ Mañana", min_value=0, value=int(m_data.get("dosis_manana", 0)), key=f"med_man_{i}")
+                    with col_m3:
+                        dosis_t = st.number_input(f"🌤️ Tarde", min_value=0, value=int(m_data.get("dosis_tarde", 0)), key=f"med_tar_{i}")
+                    with col_m4:
+                        dosis_n = st.number_input(f"🌙 Noche", min_value=0, value=int(m_data.get("dosis_noche", 0)), key=f"med_noc_{i}")
+                    with col_m5:
+                        exist_m = st.number_input(f"📦 Existencia", min_value=0, value=int(m_data.get("existencia", 0)), key=f"med_exi_{i}")
+                    with col_m6:
+                        indic_m = st.text_input(f"📝 Indicaciones", value=m_data.get("indicaciones", ""), key=f"med_ind_{i}")
                     
-                    with c_m1:
-                        nom_m = st.text_input("Nombre del Medicamento", value=m_data.get("nombre", ""), key=f"m_nom_{paciente_med_id}_{idx}")
-                    with c_m2:
-                        dos_manana = st.number_input("☀️ Mañana", min_value=0.0, step=0.5, value=float(m_data.get("dosis_manana", 0.0)), key=f"m_man_{paciente_med_id}_{idx}")
-                    with c_m3:
-                        dos_tarde = st.number_input("🌤️ Tarde", min_value=0.0, step=0.5, value=float(m_data.get("dosis_tarde", 0.0)), key=f"m_tar_{paciente_med_id}_{idx}")
-                    with c_m4:
-                        dos_noche = st.number_input("🌙 Noche", min_value=0.0, step=0.5, value=float(m_data.get("dosis_noche", 0.0)), key=f"m_noc_{paciente_med_id}_{idx}")
-                    with c_m5:
-                        exis_m = st.number_input("📦 Existencia", min_value=0.0, step=1.0, value=float(m_data.get("existencia", 0.0)), key=f"m_exi_{paciente_med_id}_{idx}")
-                    with c_m6:
-                        indic_m = st.text_input("Indicaciones / Notas", value=m_data.get("indicaciones", ""), key=f"m_ind_{paciente_med_id}_{idx}")
-                    
-                    if nom_m.strip():
+                    if nombre_m.strip():
                         meds_input.append({
-                            "nombre": nom_m.strip(),
-                            "dosis_manana": dos_manana,
-                            "dosis_tarde": dos_tarde,
-                            "dosis_noche": dos_noche,
-                            "existencia": exis_m,
-                            "indicaciones": indic_m.strip()
+                            "nombre": nombre_m.strip(),
+                            "dosis_manana": dosis_m,
+                            "dosis_tarde": dosis_t,
+                            "dosis_noche": dosis_n,
+                            "existencia": exist_m,
+                            "indicaciones": indic_m
                         })
                     st.divider()
-                
-                obs_meds_in = st.text_area("Observaciones de Medicación / Alergias", value=obs_cargadas)
-                btn_guardar_m = st.form_submit_button("💾 Guardar Esquema de Medicamentos e Inventario", use_container_width=True)
-                
-                if btn_guardar_m:
-                    guardar_medicamentos(paciente_med_id, meds_input, obs_meds_in, st.session_state["username"])
-                    st.success(f"✅ ¡Esquema de medicamentos guardado correctamente para {p_info[1]}!")
-                    st.rerun()
 
-            # Vista preliminar y descargar PDF
+                obs_meds = st.text_area("Observaciones Generales / Alergias / Contraindicaciones", value=obs_cargadas)
+                btn_guardar_meds = st.form_submit_button("💾 Guardar Esquema e Inventario de Medicamentos", use_container_width=True)
+                
+                if btn_guardar_meds:
+                    guardar_medicamentos(paciente_med_id, meds_input, obs_meds, st.session_state["username"])
+                    st.success(f"✅ ¡Esquema de medicamentos e inventario para **{paciente_med_id}** guardado exitosamente!")
+
             if meds_cargados:
-                st.subheader("📄 Reporte Imprimible de Medicación")
-                pdf_med_file = generar_pdf_medicamentos(paciente_med_id, meds_cargados, obs_cargadas)
-                with open(pdf_med_file, "rb") as f_pdf:
+                pdf_meds = generar_pdf_medicamentos(paciente_med_id, meds_cargados, obs_cargadas)
+                with open(pdf_meds, "rb") as f:
                     st.download_button(
                         label="🖨️ Descargar Hoja de Medicación (PDF)",
-                        data=f_pdf,
+                        data=f,
                         file_name=f"Medicacion_{paciente_med_id}.pdf",
                         mime="application/pdf"
                     )
 
-    # --- NUEVO SECCIÓN: ENTREGA DE MEDICAMENTOS ---
+    # --- SECCIÓN 3: ENTREGA DE MEDICAMENTOS ---
     elif menu == "🚚 Entrega de Medicamentos":
-        st.title("🚚 Entrega de Medicamentos")
-        st.caption("Registro de entregas físicas a pacientes con descuento automático del inventario")
+        st.title("🚚 Entrega Diaria de Medicamentos")
+        st.caption("Modulo para registrar la entrega de dosis a usuarios y descontar existencias de inventario")
         
-        activos = listar_pacientes_registrados(solo_activos=True)
-        if not activos:
+        pacientes_activos = listar_pacientes_por_estatus('A')
+        if not pacientes_activos:
             st.warning("⚠️ No hay usuarios activos en el sistema.")
         else:
-            opciones_pacientes = {f"{r[0]} - {r[1]}": r[0] for r in activos}
-            selected_paciente_e_label = st.selectbox("👤 Seleccionar Paciente Registrado (Activo) *", list(opciones_pacientes.keys()))
-            paciente_ent_id = opciones_pacientes[selected_paciente_e_label]
+            opciones_pacientes = {f"{p[1]} (Folio: {p[0]})": p[0] for p in pacientes_activos}
+            paciente_ent_label = st.selectbox("🔑 Seleccionar Usuario / Paciente Activo *", list(opciones_pacientes.keys()))
+            paciente_ent_id = opciones_pacientes[paciente_ent_label]
             
-            p_info = obtener_paciente_registro(paciente_ent_id)
+            p_info = obtener_paciente(paciente_ent_id)
             if p_info:
-                st.info(f"📌 **Paciente**: Folio: `{p_info[0]}` | Nombre: **{p_info[1]}** | Ingreso: {p_info[2]}")
+                st.info(f"📌 **Paciente**: {p_info[1]} | **Folio**: {p_info[0]} | **Ingreso**: {p_info[2]} | **F. Nac**: {p_info[3]} | **Sexo**: {p_info[4]}")
+
+            meds_cargados, obs_cargadas, _, _, _ = obtener_medicamentos(paciente_ent_id)
             
-            meds_cargados, obs_cargadas, f_reg_m, f_mod_m, u_reg_m = obtener_medicamentos(paciente_ent_id)
+            # Filtrar unicamente los medicamentos que tengan existencia > 0
+            meds_con_existencia = [m for m in meds_cargados if int(m.get('existencia', 0)) > 0]
             
-            # Filtrar solo los medicamentos con existencia > 0
-            meds_disponibles = [m for m in meds_cargados if float(m.get('existencia', 0)) > 0]
-            
-            if not meds_cargados:
-                st.warning("⚠️ Este paciente no tiene medicamentos registrados en 'Control de Medicamentos y Dosis'.")
-            elif not meds_disponibles:
-                st.error("❌ El paciente no cuenta con medicamentos disponibles en existencia (Stock 0 en todos sus medicamentos).")
+            if not meds_con_existencia:
+                st.warning(f"⚠️ El usuario **{paciente_ent_id}** no tiene medicamentos disponibles en inventario (Stock = 0). Debe reabastecer existencias primero en *Control de Medicamentos y Dosis*.")
             else:
-                st.subheader("💊 Medicamentos Disponibles para Entrega")
-                st.caption("Los cuadros de cantidad muestran por defecto la existencia actual disponible.")
+                st.subheader("📦 Medicamentos Disponibles para Entrega")
                 
-                with st.form("form_entrega_medicamentos"):
-                    items_a_entregar = []
+                # Usaremos session_state para saber si se procesó una entrega en esta iteracion
+                key_entrega_pdf = f"pdf_entrega_{paciente_ent_id}"
+                
+                with st.form("form_entrega_meds"):
+                    entregas_solicitadas = []
                     
-                    for idx, m in enumerate(meds_disponibles):
-                        nombre_m = m.get("nombre", "")
-                        exis_actual = float(m.get("existencia", 0.0))
-                        d_man = float(m.get("dosis_manana", 0))
-                        d_tar = float(m.get("dosis_tarde", 0))
-                        d_noc = float(m.get("dosis_noche", 0))
-                        d_diaria = d_man + d_tar + d_noc
+                    for idx, m in enumerate(meds_con_existencia):
+                        m_nom = m.get('nombre')
+                        d_man = int(m.get('dosis_manana', 0))
+                        d_tar = int(m.get('dosis_tarde', 0))
+                        d_noc = int(m.get('dosis_noche', 0))
+                        dosis_diaria = d_man + d_tar + d_noc
+                        stock_actual = int(m.get('existencia', 0))
                         
-                        st.markdown(f"#### 💊 **{nombre_m}**")
-                        c_e1, c_e2, c_e3, c_e4 = st.columns([1.5, 1.5, 1.5, 2.5])
+                        # MODIFICACIÓN SOLICITADA:
+                        # Por default el cuadro de texto toma la cantidad de la dosis a entregar (dosis_diaria), no la existencia
+                        dosis_defecto = dosis_diaria if dosis_diaria > 0 else 1
+                        val_default = min(dosis_defecto, stock_actual)
                         
+                        st.markdown(f"#### 💊 **{m_nom}**")
+                        c_e1, c_e2, c_e3 = st.columns([2, 2, 2])
                         with c_e1:
-                            st.metric("Existencia Disponible", f"{exis_actual:g}")
+                            st.write(f"**Dosis Diaria:** ☀️ {d_man} | 🌤️ {d_tar} | 🌙 {d_noc} (Total: **{dosis_diaria}**)")
+                            st.write(f"**Stock en Inventario:** 📦 **{stock_actual}** unidades")
                         with c_e2:
-                            st.metric("Dosis Diaria", f"{d_diaria:g}")
-                        with c_e3:
-                            # Por default, el cuadro de texto está lleno con la existencia actual de ese medicamento
-                            # La cantidad debe ser al menos 1
-                            val_default = max(int(exis_actual) if exis_actual.is_integer() else exis_actual, 1.0)
                             cant_entregar = st.number_input(
-                                f"Cantidad a Entregar *",
-                                min_value=1.0,
-                                max_value=float(exis_actual),
-                                value=float(val_default),
-                                step=1.0,
+                                f"Cantidad a entregar de {m_nom}",
+                                min_value=1,
+                                max_value=stock_actual,
+                                value=int(val_default),
                                 key=f"ent_cant_{paciente_ent_id}_{idx}"
                             )
-                        with c_e4:
-                            confirmar_entrega = st.checkbox(
-                                "Entregar este medicamento",
-                                value=True,
-                                key=f"ent_chk_{paciente_ent_id}_{idx}"
-                            )
-                            
-                        if confirmar_entrega and cant_entregar >= 1.0:
-                            items_a_entregar.append({
-                                "nombre": nombre_m,
-                                "cantidad_entregada": cant_entregar,
-                                "existencia_previa": exis_actual,
-                                "existencia_nueva": exis_actual - cant_entregar,
-                                "indicaciones": m.get("indicaciones", "")
-                            })
+                        with c_e3:
+                            st.write(f"**Nuevo Stock tras entrega:** {stock_actual - cant_entregar}")
                         st.divider()
-                    
-                    obs_entrega = st.text_area("Observaciones o Notas de la Entrega", value="")
+                        
+                        entregas_solicitadas.append({
+                            "nombre": m_nom,
+                            "cantidad_entregada": cant_entregar,
+                            "stock_restante": stock_actual - cant_entregar
+                        })
+
                     btn_confirmar_entrega = st.form_submit_button("📦 Registrar Entrega y Descontar de Existencia", use_container_width=True)
-                    
-                    if btn_confirmar_entrega:
-                        if not items_a_entregar:
-                            st.error("⚠️ Debe seleccionar al menos un medicamento con cantidad entregada de al menos 1.")
-                        else:
-                            # 1. Actualizar existencias en la lista original de medicamentos
-                            map_nuevas_existencias = {it["nombre"]: it["existencia_nueva"] for it in items_a_entregar}
-                            
-                            meds_actualizados = []
-                            for m in meds_cargados:
-                                m_copy = dict(m)
-                                if m_copy.get("nombre") in map_nuevas_existencias:
-                                    m_copy["existencia"] = map_nuevas_existencias[m_copy.get("nombre")]
-                                meds_actualizados.append(m_copy)
-                            
-                            # 2. Guardar medicamentos actualizados
-                            guardar_medicamentos(paciente_ent_id, meds_actualizados, obs_cargadas, st.session_state["username"])
-                            
-                            # 3. Registrar transacción de entrega
-                            registrar_entrega_medicamentos(paciente_ent_id, items_a_entregar, obs_entrega, st.session_state["username"])
-                            
-                            st.success(f"✅ ¡Entrega registrada exitosamente para {p_info[1]}! Las existencias han sido actualizadas.")
-                            
-                            # Generar PDF comprobante
-                            pdf_ent_file = generar_pdf_comprobante_entrega(paciente_ent_id, items_a_entregar, obs_entrega)
-                            with open(pdf_ent_file, "rb") as f_ent_pdf:
-                                st.download_button(
-                                    label="🖨️ Descargar Comprobante de Entrega (PDF)",
-                                    data=f_ent_pdf,
-                                    file_name=f"Comprobante_Entrega_{paciente_ent_id}.pdf",
-                                    mime="application/pdf"
-                                )
-                            st.rerun()
-
-            # Mostrar historial reciente de entregas
-            historial_entregas = listar_entregas_paciente(paciente_ent_id)
-            if historial_entregas:
-                st.subheader("📋 Historial de Entregas Realizadas a este Paciente")
-                for h_item in historial_entregas:
-                    f_ent, u_ent, json_ent, obs_e = h_item
-                    list_items = json.loads(json_ent)
-                    with st.expander(f"📦 Entrega del {f_ent} | Registrado por: {u_ent}"):
-                        for it in list_items:
-                            st.write(f"• **{it['nombre']}**: {it['cantidad_entregada']} unidades entregadas (Stock restante: {it['existencia_nueva']})")
-                        if obs_e:
-                            st.caption(f"Notas: {obs_e}")
-
-    # --- SECCIÓN 3: ALERTAS DE EXISTENCIA Y COMPRAS ---
-    elif menu == "🚨 Alertas de Existencia y Compras":
-        st.title("🚨 Alertas de Existencia y Lista de Compras")
-        st.caption("Consolidado general de reabastecimiento para medicamentos de pacientes activos ('A')")
-        
-        todos_meds = listar_todos_medicamentos()
-        
-        lista_compras = []
-        criticos_count = 0
-        preventivos_count = 0
-        
-        for reg in todos_meds:
-            pid, m_json, obs, fmod, pnom, pest = reg
-            if pest == 'A' and m_json:
-                med_list = json.loads(m_json)
-                for m in med_list:
-                    dm = float(m.get('dosis_manana', 0))
-                    dt = float(m.get('dosis_tarde', 0))
-                    dn = float(m.get('dosis_noche', 0))
-                    d_diaria = dm + dt + dn
-                    exis = float(m.get('existencia', 0))
-                    
-                    if d_diaria > 0:
-                        dias_cobertura = exis / d_diaria
-                        if dias_cobertura < 1.0:
-                            criticos_count += 1
-                            sugerido = max(d_diaria * 7 - exis, d_diaria)
-                            lista_compras.append({
-                                "folio": pid,
-                                "paciente": pnom,
-                                "medicamento": m.get('nombre', ''),
-                                "existencia": exis,
-                                "dosis_diaria": d_diaria,
-                                "dias_cobertura": dias_cobertura,
-                                "nivel": "CRÍTICO (Menos de 1 día)",
-                                "sugerido_compra": sugerido
-                            })
-                        elif dias_cobertura <= 3.0:
-                            preventivos_count += 1
-                            sugerido = max(d_diaria * 7 - exis, d_diaria)
-                            lista_compras.append({
-                                "folio": pid,
-                                "paciente": pnom,
-                                "medicamento": m.get('nombre', ''),
-                                "existencia": exis,
-                                "dosis_diaria": d_diaria,
-                                "dias_cobertura": dias_cobertura,
-                                "nivel": "PREVENTIVO (1 a 3 días)",
-                                "sugerido_compra": sugerido
-                            })
-
-        col_m1, col_m2 = st.columns(2)
-        with col_m1:
-            st.metric("🔴 Alertas Críticas (Menos de 24h)", criticos_count)
-        with col_m2:
-            st.metric("🟡 Alertas Preventivas (1 a 3 días)", preventivos_count)
-            
-        st.divider()
-        
-        if not lista_compras:
-            st.success("🎉 ¡Excelente! Todos los medicamentos de pacientes activos tienen existencias suficientes para más de 3 días.")
-        else:
-            st.subheader("📋 Lista de Personas y Medicamentos a Reabastecer")
-            
-            for item in lista_compras:
-                color_box = "🔴" if "CRÍTICO" in item['nivel'] else "🟡"
-                st.warning(f"{color_box} **{item['paciente']}** (`{item['folio']}`) — **{item['medicamento']}** | Existencia: `{item['existencia']}` | Dosis Diaria: `{item['dosis_diaria']}` | Cobertura: `{item['dias_cobertura']:.1f} días` | Sugerido Comprar: `{item['sugerido_compra']}`")
                 
-            pdf_compras = generar_pdf_compras(lista_compras)
-            with open(pdf_compras, "rb") as f_comp:
+                # Procesar la entrega FUERA del form context para evitar el StreamlitInvalidLayoutContextError
+                if btn_confirmar_entrega:
+                    registrar_entrega_medicamentos(paciente_ent_id, entregas_solicitadas, st.session_state["username"])
+                    st.success(f"✅ ¡Entrega de medicamentos registrada con éxito para el usuario **{paciente_ent_id}**!")
+                    
+                    pdf_ent = generar_pdf_entrega(paciente_ent_id, entregas_solicitadas, st.session_state["username"])
+                    st.session_state[key_entrega_pdf] = pdf_ent
+                    st.rerun()
+
+                # Mostrar boton de descarga si existe un PDF generado en la sesion
+                if key_entrega_pdf in st.session_state:
+                    pdf_file_path = st.session_state[key_entrega_pdf]
+                    if os.path.exists(pdf_file_path):
+                        with open(pdf_file_path, "rb") as f:
+                            st.download_button(
+                                label="🖨️ Descargar Comprobante de Entrega (PDF)",
+                                data=f,
+                                file_name=os.path.basename(pdf_file_path),
+                                mime="application/pdf",
+                                key="btn_download_entrega"
+                            )
+
+    # --- SECCIÓN 4: ALERTAS Y REABASTECIMIENTO DE MEDICAMENTOS ---
+    elif menu == "🚨 Alertas de Existencia y Compras":
+        st.title("🚨 Alertas de Existencias y Lista de Compras")
+        st.caption("Deteccion automatica de medicamentos proximos a agotarse para usuarios activos")
+        
+        todos_meds = listar_todos_medicamentos_activos()
+        
+        alertas_criticas = []
+        alertas_preventivas = []
+        lista_compras = []
+        
+        for row in todos_meds:
+            p_id, p_nombre, meds_json_str, obs, f_mod = row
+            meds_l = json.loads(meds_json_str) if meds_json_str else []
+            
+            for m in meds_l:
+                m_nom = m.get('nombre')
+                d_man = int(m.get('dosis_manana', 0))
+                d_tar = int(m.get('dosis_tarde', 0))
+                d_noc = int(m.get('dosis_noche', 0))
+                dosis_diaria = d_man + d_tar + d_noc
+                exist = int(m.get('existencia', 0))
+                
+                if dosis_diaria > 0:
+                    dias_restantes = exist / dosis_diaria
+                    
+                    if dias_restantes < 1:  # Menos de 1 dia (critico)
+                        item_a = {
+                            "paciente_id": p_id,
+                            "paciente_nombre": p_nombre,
+                            "med_nombre": m_nom,
+                            "existencia": exist,
+                            "dosis_diaria": dosis_diaria,
+                            "dias_cubiertos": round(dias_restantes, 1),
+                            "sugerido_compra": max(30, dosis_diaria * 15)  # Sugerir para 15 dias o 30 pastillas
+                        }
+                        alertas_criticas.append(item_a)
+                        lista_compras.append(item_a)
+                    elif dias_restantes <= 3:  # Menos de 3 dias (preventivo)
+                        item_p = {
+                            "paciente_id": p_id,
+                            "paciente_nombre": p_nombre,
+                            "med_nombre": m_nom,
+                            "existencia": exist,
+                            "dosis_diaria": dosis_diaria,
+                            "dias_cubiertos": round(dias_restantes, 1),
+                            "sugerido_compra": max(30, dosis_diaria * 15)
+                        }
+                        alertas_preventivas.append(item_p)
+                        lista_compras.append(item_p)
+
+        c_met1, c_met2, c_met3 = st.columns(3)
+        with c_met1:
+            st.metric("🔴 Alertas Críticas (< 1 Día)", len(alertas_criticas))
+        with c_met2:
+            st.metric("🟡 Alertas Preventivas (1-3 Días)", len(alertas_preventivas))
+        with c_met3:
+            st.metric("🛒 Total Medicamentos a Comprar", len(lista_compras))
+
+        st.divider()
+
+        if not lista_compras:
+            st.success("🎉 ¡Excelente! Todos los usuarios activos cuentan con existencias suficientes de medicamentos para los próximos días.")
+        else:
+            st.subheader("🛒 Lista Consolidada de Compras por Paciente")
+            
+            if alertas_criticas:
+                st.error("🔴 **ALERTAS CRÍTICAS - MEDICAMENTOS AGOTADOS O PRÓXIMOS A AGOTARSE HOY**")
+                for ac in alertas_criticas:
+                    st.write(f"• **{ac['paciente_nombre']}** (Folio: `{ac['paciente_id']}`): Medicamento **{ac['med_nombre']}** ➔ Existencia actual: **{ac['existencia']}** | Dosis Diaria: **{ac['dosis_diaria']}** (Cubre: {ac['dias_cubiertos']} días) ➔ **Sugerido comprar: {ac['sugerido_compra']} unidades**")
+                st.divider()
+                
+            if alertas_preventivas:
+                st.warning("🟡 **ALERTAS PREVENTIVAS - REABASTECER PRÓXIMOS 3 DÍAS**")
+                for ap in alertas_preventivas:
+                    st.write(f"• **{ap['paciente_nombre']}** (Folio: `{ap['paciente_id']}`): Medicamento **{ap['med_nombre']}** ➔ Existencia actual: **{ap['existencia']}** | Dosis Diaria: **{ap['dosis_diaria']}** (Cubre: {ap['dias_cubiertos']} días) ➔ **Sugerido comprar: {ap['sugerido_compra']} unidades**")
+                st.divider()
+
+            pdf_comp = generar_pdf_compras(lista_compras)
+            with open(pdf_comp, "rb") as f:
                 st.download_button(
-                    label="🖨️ Descargar Lista de Compras (PDF)",
-                    data=f_comp,
+                    label="🖨️ Descargar Lista de Compras en PDF",
+                    data=f,
                     file_name=f"Lista_Compras_{datetime.now().strftime('%Y%m%d')}.pdf",
                     mime="application/pdf"
                 )
 
-    # --- SECCIÓN 4: BUSCAR Y LISTAR PACIENTES ---
+    # --- SECCIÓN 5: BUSCAR Y LISTAR PACIENTES Y EXPEDIENTES ---
     elif menu == "🔍 Buscar y Listar Pacientes":
-        st.title("🔍 Directorio y Consultas de Pacientes")
+        st.title("🔍 Directorio e Historial de Expedientes")
         
-        filtro_estatus = st.radio("Mostrar usuarios por estatus:", ["Solo Activos ('A')", "Todos (Incluye Bloqueados 'B')"], horizontal=True)
-        solo_act = (filtro_estatus == "Solo Activos ('A')")
+        filtro_estatus = st.selectbox("Filtrar por estatus de usuario:", ["ACTIVOS ('A')", "BLOQUEADOS ('B')", "TODOS"])
+        est_query = 'A' if "ACTIVOS" in filtro_estatus else ('B' if "BLOQUEADOS" in filtro_estatus else 'TODOS')
         
-        pacientes = listar_pacientes_registrados(solo_activos=solo_act)
+        pacientes_lista = listar_pacientes_por_estatus(est_query)
         
-        if not pacientes:
-            st.warning("No hay pacientes registrados con el filtro seleccionado.")
+        if not pacientes_lista:
+            st.info("No se encontraron registros de pacientes con ese filtro.")
         else:
-            st.subheader(f"Total de registros encontrados: {len(pacientes)}")
+            st.subheader(f"Total de registros encontrados: {len(pacientes_lista)}")
             
-            for pac in pacientes:
-                p_id, p_nom, f_ing, f_nac, p_sex, p_est, f_mod = pac
-                tag_est = "🟢 ACTIVO" if p_est == 'A' else "🔒 BLOQUEADO"
+            for p in pacientes_lista:
+                p_id, p_nom, p_ing, p_nac, p_sex, p_est = p
+                est_label = "🟢 ACTIVO" if p_est == 'A' else "🔒 BLOQUEADO"
                 
-                with st.expander(f"👤 **{p_nom}** | Folio: `{p_id}` | [{tag_est}]"):
-                    c_det1, c_det2 = st.columns([2, 1])
+                with st.expander(f"👤 **{p_nom}** | Folio: **{p_id}** | Estatus: {est_label}"):
+                    c_det1, c_det2 = st.columns([3, 1])
                     with c_det1:
-                        st.write(f"**Fecha Ingreso:** {f_ing} | **Fecha Nacimiento:** {f_nac} | **Sexo:** {p_sex}")
-                        st.write(f"**Última Modificación:** {f_mod}")
-                    with c_det2:
-                        # Descargar Entrevista PDF
-                        datos_p, _, _, _ = obtener_entrevista(p_id)
-                        if datos_p:
-                            pdf_ent = generar_pdf_entrevista(p_id, datos_p)
-                            with open(pdf_ent, "rb") as f_e:
-                                st.download_button(
-                                    label="📄 Entrevista (PDF)",
-                                    data=f_e,
-                                    file_name=f"Entrevista_{p_id}.pdf",
-                                    mime="application/pdf",
-                                    key=f"pdf_e_{p_id}"
-                                )
+                        st.write(f"**Fecha de Ingreso:** {p_ing} | **Fecha de Nacimiento:** {p_nac} | **Sexo:** {p_sex}")
                         
-                        # Descargar Medicación PDF
                         meds_p, obs_p, _, _, _ = obtener_medicamentos(p_id)
                         if meds_p:
-                            pdf_m = generar_pdf_medicamentos(p_id, meds_p, obs_p)
-                            with open(pdf_m, "rb") as f_m:
+                            st.write(f"**Medicamentos Asignados:** {len(meds_p)} registrada(s)")
+                    with c_det2:
+                        datos_p, _, _, _ = obtener_entrevista(p_id)
+                        if datos_p:
+                            pdf_file = generar_pdf_entrevista(p_id, datos_p)
+                            with open(pdf_file, "rb") as f:
                                 st.download_button(
-                                    label="💊 Medicación (PDF)",
-                                    data=f_m,
+                                    label="🖨️ Descargar Entrevista (PDF)",
+                                    data=f,
+                                    file_name=f"Entrevista_{p_id}.pdf",
+                                    mime="application/pdf",
+                                    key=f"pdf_ent_{p_id}"
+                                )
+                        
+                        if meds_p:
+                            pdf_meds_file = generar_pdf_medicamentos(p_id, meds_p, obs_p)
+                            with open(pdf_meds_file, "rb") as f:
+                                st.download_button(
+                                    label="🖨️ Descargar Medicación (PDF)",
+                                    data=f,
                                     file_name=f"Medicacion_{p_id}.pdf",
                                     mime="application/pdf",
-                                    key=f"pdf_m_{p_id}"
+                                    key=f"pdf_med_{p_id}"
                                 )
 
-    # --- SECCIÓN 5: SEGURIDAD ---
+    # --- SECCIÓN 6: SEGURIDAD ---
     elif menu == "⚙️ Seguridad / Contraseña":
         st.title("⚙️ Configuración de Seguridad")
-        st.subheader("Cambiar Contraseña de Usuario del Sistema")
+        st.subheader("Cambiar Contraseña de Usuario")
         
         with st.form("form_cambio_pass"):
             actual_pass = st.text_input("Contraseña Actual", type="password")
