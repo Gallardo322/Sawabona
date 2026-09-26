@@ -3,8 +3,7 @@ import sqlite3
 import json
 import hashlib
 import os
-import io
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from fpdf import FPDF
 
 # --- CONFIGURACIÓN DE PÁGINA ---
@@ -17,13 +16,13 @@ st.set_page_config(
 
 DB_FILE = "sistema_pacientes.db"
 
-# --- FUNCIONES DE BASE DE DATOS Y MIGRACIONES ---
+# --- FUNCIONES DE BASE DE DATOS E INICIALIZACIÓN ---
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     
-    # 1. Tabla de Usuarios (Login y Roles)
-    c.execute('''
+    # 1. Tabla de Usuarios Administrativos / Staff
+    c.execute("""
         CREATE TABLE IF NOT EXISTS usuarios (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE NOT NULL,
@@ -31,18 +30,18 @@ def init_db():
             nombre_completo TEXT,
             rol TEXT DEFAULT 'Nivel 1 - Administrador'
         )
-    ''')
+    """)
     
-    # Migración de columna 'rol' en usuarios si no existe
+    # Migración de columna 'rol' si la tabla usuarios ya existía
     c.execute("PRAGMA table_info(usuarios)")
-    cols_usuarios = [col[1] for col in c.fetchall()]
-    if "rol" not in cols_usuarios:
+    cols_u = [row[1] for row in c.fetchall()]
+    if 'rol' not in cols_u:
         try:
             c.execute("ALTER TABLE usuarios ADD COLUMN rol TEXT DEFAULT 'Nivel 1 - Administrador'")
         except Exception:
             pass
 
-    # Crear/Asegurar usuario admin por defecto
+    # Asegurar que admin tenga rol Administrador
     c.execute('SELECT * FROM usuarios WHERE username = ?', ('admin',))
     if not c.fetchone():
         default_pass = hashlib.sha256("admin123".encode()).hexdigest()
@@ -51,8 +50,8 @@ def init_db():
     else:
         c.execute("UPDATE usuarios SET rol = 'Nivel 1 - Administrador' WHERE username = 'admin'")
 
-    # 2. Tabla de Pacientes / Residentes
-    c.execute('''
+    # 2. Tabla de Pacientes / Residentes de la Comunidad
+    c.execute("""
         CREATE TABLE IF NOT EXISTS pacientes (
             paciente_id TEXT PRIMARY KEY,
             nombre_completo TEXT NOT NULL,
@@ -69,27 +68,19 @@ def init_db():
             fecha_modificacion TEXT,
             usuario_registro TEXT
         )
-    ''')
+    """)
     
-    # Migraciones para tabla 'pacientes'
+    # Migraciones en pacientes si faltaran columnas
     c.execute("PRAGMA table_info(pacientes)")
-    cols_pacientes = [col[1] for col in c.fetchall()]
-    m_pacientes = {
-        "tipo_usuario": "TEXT DEFAULT 'Paciente'",
-        "etapa_actual": "TEXT DEFAULT 'ACOGIDA'",
-        "fecha_inicio_etapa": "TEXT",
-        "hermano_mayor_id": "TEXT",
-        "fecha_suelta_hermano": "TEXT"
-    }
-    for col_name, col_def in m_pacientes.items():
-        if col_name not in cols_pacientes:
-            try:
-                c.execute(f"ALTER TABLE pacientes ADD COLUMN {col_name} {col_def}")
-            except Exception:
-                pass
+    cols_p = [row[1] for row in c.fetchall()]
+    if 'fecha_inicio_etapa' not in cols_p:
+        try:
+            c.execute("ALTER TABLE pacientes ADD COLUMN fecha_inicio_etapa TEXT")
+        except Exception:
+            pass
 
-    # 3. Tabla de Entrevistas Iniciales
-    c.execute('''
+    # 3. Tabla de Entrevistas de Consejería
+    c.execute("""
         CREATE TABLE IF NOT EXISTS entrevistas (
             paciente_id TEXT PRIMARY KEY,
             fecha_registro TEXT,
@@ -97,10 +88,34 @@ def init_db():
             usuario_registro TEXT,
             datos_json TEXT
         )
-    ''')
+    """)
 
-    # 4. Tabla de Medicamentos e Inventario por Paciente
-    c.execute('''
+    # 4. Tabla Catálogo de Medicamentos
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS catalogo_medicamentos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre_medicamento TEXT UNIQUE NOT NULL,
+            presentacion TEXT,
+            concentracion TEXT,
+            observaciones TEXT
+        )
+    """)
+    
+    # Población inicial de catálogo de medicamentos si está vacío
+    c.execute('SELECT COUNT(*) FROM catalogo_medicamentos')
+    if c.fetchone()[0] == 0:
+        meds_iniciales = [
+            ('Paracetamol', 'Comprimidos', '500 mg', 'Analgésico / Antipirético'),
+            ('Ibuprofeno', 'Comprimidos', '400 mg', 'Antiinflamatorio'),
+            ('Omeprazol', 'Cápsulas', '20 mg', 'Protector gástrico'),
+            ('Complex B', 'Tabletas', 'Multivitamínico', 'Suplemento vitamínico'),
+            ('Sertralina', 'Tabletas', '50 mg', 'Ansiolítico / Antidepresivo'),
+            ('Clonazepam', 'Gotas', '2.5 mg/ml', 'Uso controlado con receta')
+        ]
+        c.executemany('INSERT INTO catalogo_medicamentos (nombre_medicamento, presentacion, concentracion, observaciones) VALUES (?, ?, ?, ?)', meds_iniciales)
+
+    # 5. Tabla de Medicamentos e Inventario por Paciente
+    c.execute("""
         CREATE TABLE IF NOT EXISTS medicamentos (
             paciente_id TEXT PRIMARY KEY,
             meds_json TEXT,
@@ -109,10 +124,10 @@ def init_db():
             fecha_modificacion TEXT,
             usuario_registro TEXT
         )
-    ''')
+    """)
 
-    # 5. Tabla de Historial de Entregas
-    c.execute('''
+    # 6. Tabla de Historial de Entregas de Medicamentos
+    c.execute("""
         CREATE TABLE IF NOT EXISTS entregas_medicamentos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             paciente_id TEXT,
@@ -120,10 +135,10 @@ def init_db():
             entregado_por TEXT,
             detalle_json TEXT
         )
-    ''')
+    """)
 
-    # 6. Tabla de Grupos Terapéuticos
-    c.execute('''
+    # 7. Tabla de Grupos Terapéuticos (Terapia de Grupo, Aquí y Ahora, Feedback)
+    c.execute("""
         CREATE TABLE IF NOT EXISTS grupos_terapeutos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             paciente_id TEXT,
@@ -135,10 +150,10 @@ def init_db():
             fecha_registro TEXT,
             usuario_registro TEXT
         )
-    ''')
+    """)
 
-    # 7. Tabla de Historial de Etapas
-    c.execute('''
+    # 8. Tabla de Historial de Cambios de Etapa
+    c.execute("""
         CREATE TABLE IF NOT EXISTS historial_etapas (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             paciente_id TEXT,
@@ -147,44 +162,19 @@ def init_db():
             fecha_cambio TEXT,
             usuario_autoriza TEXT
         )
-    ''')
+    """)
 
-    # 8. Tabla de Requisitos de Etapas
-    c.execute('''
+    # 9. Tabla de Requisitos por Etapa (Configurable)
+    c.execute("""
         CREATE TABLE IF NOT EXISTS requisitos_etapas (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             etapa TEXT,
             requisito TEXT,
             es_grupo INTEGER DEFAULT 0
         )
-    ''')
-
-    # 9. Tabla de Repositorio de Documentos
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS repositorio_documentos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            carpeta TEXT,
-            nombre_archivo TEXT,
-            mime_type TEXT,
-            bytes_blob BLOB,
-            descripcion TEXT,
-            fecha_subida TEXT,
-            usuario_subida TEXT
-        )
-    ''')
-
-    # 10. Tabla de Catálogo de Medicamentos
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS catalogo_medicamentos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nombre TEXT UNIQUE NOT NULL,
-            concentracion TEXT,
-            presentacion TEXT,
-            descripcion TEXT
-        )
-    ''')
-
-    # Poblar Requisitos Iniciales si está vacía
+    """)
+    
+    # Población inicial de requisitos de etapas si está vacía
     c.execute('SELECT COUNT(*) FROM requisitos_etapas')
     if c.fetchone()[0] == 0:
         reqs = [
@@ -226,27 +216,26 @@ def init_db():
         ]
         c.executemany('INSERT INTO requisitos_etapas (etapa, requisito, es_grupo) VALUES (?, ?, ?)', reqs)
 
-    # Poblar Catálogo Inicial de Medicamentos si está vacío
-    c.execute('SELECT COUNT(*) FROM catalogo_medicamentos')
-    if c.fetchone()[0] == 0:
-        meds_base = [
-            ('Omeprazol', '20 mg', 'Cápsulas', 'Protector gástrico'),
-            ('Paracetamol', '500 mg', 'Comprimidos', 'Analgésico / Antipirético'),
-            ('Ibuprofeno', '400 mg', 'Comprimidos', 'Antiinflamatorio'),
-            ('Sertralina', '50 mg', 'Comprimidos', 'Antidepresivo ISRS'),
-            ('Clonazepam', '2 mg', 'Comprimidos', 'Ansiolítico / Anticonvulsivo'),
-            ('Quetiapina', '100 mg', 'Comprimidos', 'Antipsicótico / Estabilizador'),
-            ('Complejo B', 'Multivitamínico', 'Comprimidos', 'Suplemento vitamínico')
-        ]
-        c.executemany('INSERT INTO catalogo_medicamentos (nombre, concentracion, presentacion, descripcion) VALUES (?, ?, ?, ?)', meds_base)
+    # 10. Tabla de Repositorio de Documentos (Archivos PDF, Word, Excel, etc.)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS repositorio_documentos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            carpeta TEXT NOT NULL,
+            nombre_archivo TEXT NOT NULL,
+            mime_type TEXT,
+            bytes_blob BLOB,
+            descripcion TEXT,
+            fecha_subida TEXT,
+            usuario_subida TEXT
+        )
+    """)
 
     conn.commit()
     conn.close()
 
-# Inicializar Base de Datos al arrancar
 init_db()
 
-# --- FUNCIONES DE AUTENTICACIÓN Y ROLES ---
+# --- FUNCIONES AUXILIARES DE SEGURIDAD Y PERMISOS ---
 def hash_pass(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
@@ -260,99 +249,225 @@ def verificar_login(username, password):
     return result
 
 def es_admin():
-    user = str(st.session_state.get("username", "")).lower()
-    rol = str(st.session_state.get("rol", ""))
-    return user == "admin" or "administrador" in rol.lower() or "nivel 1" in rol.lower()
+    if "username" in st.session_state and st.session_state["username"] == "admin":
+        return True
+    rol = st.session_state.get("rol", "")
+    return "Nivel 1" in rol or "Administrador" in rol
 
 def puede_escribir():
     if es_admin():
         return True
-    rol = str(st.session_state.get("rol", ""))
-    return "nivel 2" in rol.lower() or "escritura" in rol.lower()
+    rol = st.session_state.get("rol", "")
+    return "Nivel 2" in rol or "Escritura" in rol
 
-def es_solo_lectura():
-    return not puede_escribir()
-
-# --- FUNCIONES DE PACIENTES ---
-def guardar_usuario_paciente(p_id, nombre, f_ingreso, f_nac, sexo, estatus, t_usuario, usuario_reg):
+# --- FUNCIONES DE MANEJO DE PACIENTES Y GRUPOS ---
+def obtener_siguiente_folio():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    f_act = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    c.execute('SELECT paciente_id FROM pacientes WHERE paciente_id = ?', (p_id,))
-    ex = c.fetchone()
-    if ex:
-        c.execute('''
-            UPDATE pacientes 
-            SET nombre_completo = ?, fecha_ingreso = ?, fecha_nacimiento = ?, sexo = ?, estatus = ?, tipo_usuario = ?, fecha_modificacion = ?
-            WHERE paciente_id = ?
-        ''', (nombre, f_ingreso, f_nac, sexo, estatus, t_usuario, f_act, p_id))
+    c.execute('SELECT paciente_id FROM pacientes')
+    rows = c.fetchall()
+    conn.close()
+    max_num = 0
+    for r in rows:
+        pid = r[0]
+        if pid.startswith("PAC-"):
+            try:
+                num = int(pid.replace("PAC-", ""))
+                if num > max_num:
+                    max_num = num
+            except ValueError:
+                pass
+    return f"PAC-{max_num + 1:03d}"
+
+def verificar_duplicado_nombre(nombre, paciente_id_actual=None):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    nombre_clean = " ".join(nombre.strip().upper().split())
+    if paciente_id_actual:
+        c.execute('SELECT paciente_id, nombre_completo, estatus FROM pacientes WHERE paciente_id != ?', (paciente_id_actual,))
     else:
-        c.execute('''
+        c.execute('SELECT paciente_id, nombre_completo, estatus FROM pacientes')
+    rows = c.fetchall()
+    conn.close()
+    for pid, pnom, pest in rows:
+        if " ".join(pnom.strip().upper().split()) == nombre_clean:
+            return pid, pnom, pest
+    return None
+
+def guardar_usuario_paciente(paciente_id, nombre_completo, fecha_ingreso, fecha_nacimiento, sexo, estatus, tipo_usuario, etapa_actual, fecha_inicio_etapa, usuario_act):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    fecha_actual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    f_ing_str = fecha_ingreso.strftime("%Y-%m-%d") if isinstance(fecha_ingreso, (datetime, date)) else str(fecha_ingreso)
+    f_nac_str = fecha_nacimiento.strftime("%Y-%m-%d") if isinstance(fecha_nacimiento, (datetime, date)) else str(fecha_nacimiento)
+    f_ini_etapa_str = fecha_inicio_etapa.strftime("%Y-%m-%d") if isinstance(fecha_inicio_etapa, (datetime, date)) else str(fecha_inicio_etapa)
+    
+    c.execute('SELECT paciente_id FROM pacientes WHERE paciente_id = ?', (paciente_id,))
+    existe = c.fetchone()
+    if existe:
+        c.execute("""
+            UPDATE pacientes
+            SET nombre_completo = ?, fecha_ingreso = ?, fecha_nacimiento = ?, sexo = ?,
+                estatus = ?, tipo_usuario = ?, etapa_actual = ?, fecha_inicio_etapa = ?,
+                fecha_modificacion = ?, usuario_registro = ?
+            WHERE paciente_id = ?
+        """, (nombre_completo, f_ing_str, f_nac_str, sexo, estatus, tipo_usuario, etapa_actual, f_ini_etapa_str, fecha_actual, usuario_act, paciente_id))
+    else:
+        c.execute("""
             INSERT INTO pacientes (paciente_id, nombre_completo, fecha_ingreso, fecha_nacimiento, sexo, estatus, tipo_usuario, etapa_actual, fecha_inicio_etapa, fecha_registro, fecha_modificacion, usuario_registro)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'ACOGIDA', ?, ?, ?, ?)
-        ''', (p_id, nombre, f_ingreso, f_nac, sexo, estatus, t_usuario, f_ingreso, f_act, f_act, usuario_reg))
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (paciente_id, nombre_completo, f_ing_str, f_nac_str, sexo, estatus, tipo_usuario, etapa_actual, f_ini_etapa_str, fecha_actual, fecha_actual, usuario_act))
     conn.commit()
     conn.close()
 
-def listar_pacientes_todos(solo_activos=False):
+def listar_todos_pacientes():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    if solo_activos:
-        c.execute('SELECT paciente_id, nombre_completo, fecha_ingreso, fecha_nacimiento, sexo, estatus, tipo_usuario, etapa_actual, fecha_inicio_etapa, hermano_mayor_id, fecha_suelta_hermano FROM pacientes WHERE estatus = "A" ORDER BY nombre_completo ASC')
-    else:
-        c.execute('SELECT paciente_id, nombre_completo, fecha_ingreso, fecha_nacimiento, sexo, estatus, tipo_usuario, etapa_actual, fecha_inicio_etapa, hermano_mayor_id, fecha_suelta_hermano FROM pacientes ORDER BY nombre_completo ASC')
+    c.execute('SELECT paciente_id, nombre_completo, fecha_ingreso, fecha_nacimiento, sexo, estatus, tipo_usuario, etapa_actual, fecha_inicio_etapa, hermano_mayor_id, fecha_suelta_hermano FROM pacientes ORDER BY paciente_id ASC')
     rows = c.fetchall()
     conn.close()
     return rows
 
-def obtener_paciente_por_id(p_id):
+def obtener_paciente(paciente_id):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('SELECT paciente_id, nombre_completo, fecha_ingreso, fecha_nacimiento, sexo, estatus, tipo_usuario, etapa_actual, fecha_inicio_etapa, hermano_mayor_id, fecha_suelta_hermano FROM pacientes WHERE paciente_id = ?', (p_id,))
+    c.execute('SELECT paciente_id, nombre_completo, fecha_ingreso, fecha_nacimiento, sexo, estatus, tipo_usuario, etapa_actual, fecha_inicio_etapa, hermano_mayor_id, fecha_suelta_hermano FROM pacientes WHERE paciente_id = ?', (paciente_id,))
     row = c.fetchone()
     conn.close()
     return row
 
-def generar_siguiente_folio():
+def promover_paciente_etapa(paciente_id, etapa_origen, etapa_destino, usuario_act):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('SELECT paciente_id FROM pacientes WHERE paciente_id LIKE "PAC-%"')
+    fecha_actual_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    f_hoy_str = datetime.now().strftime("%Y-%m-%d")
+    
+    # Actualizar etapa_actual y reiniciar fecha_inicio_etapa
+    c.execute("""
+        UPDATE pacientes
+        SET etapa_actual = ?, fecha_inicio_etapa = ?, fecha_modificacion = ?, usuario_registro = ?
+        WHERE paciente_id = ?
+    """, (etapa_destino, f_hoy_str, fecha_actual_str, usuario_act, paciente_id))
+    
+    # Guardar en historial
+    c.execute("""
+        INSERT INTO historial_etapas (paciente_id, etapa_origen, etapa_destino, fecha_cambio, usuario_autoriza)
+        VALUES (?, ?, ?, ?, ?)
+    """, (paciente_id, etapa_origen, etapa_destino, fecha_actual_str, usuario_act))
+    
+    conn.commit()
+    conn.close()
+
+def asignar_hermano_mayor(paciente_id, hermano_mayor_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('UPDATE pacientes SET hermano_mayor_id = ? WHERE paciente_id = ?', (hermano_mayor_id, paciente_id))
+    conn.commit()
+    conn.close()
+
+def registrar_suelta_hermano(paciente_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    fecha_hoy = datetime.now().strftime("%Y-%m-%d")
+    c.execute('UPDATE pacientes SET fecha_suelta_hermano = ? WHERE paciente_id = ?', (fecha_hoy, paciente_id))
+    conn.commit()
+    conn.close()
+
+# --- FUNCIONES DE GRUPOS TERAPÉUTICOS ---
+def guardar_grupo_terapeutico(paciente_id, tipo_grupo, etapa_al_momento, fecha_grupo, facilitador, datos_dict, usuario_act):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    fecha_actual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    datos_json = json.dumps(datos_dict, ensure_ascii=False)
+    c.execute("""
+        INSERT INTO grupos_terapeutos (paciente_id, tipo_grupo, etapa_al_momento, fecha_grupo, facilitador, datos_json, fecha_registro, usuario_registro)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (paciente_id, tipo_grupo, etapa_al_momento, fecha_grupo, facilitador, datos_json, fecha_actual, usuario_act))
+    conn.commit()
+    conn.close()
+
+def contar_grupos_paciente_etapa(paciente_id, etapa_actual, tipo_grupo):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("""
+        SELECT COUNT(*) FROM grupos_terapeutos
+        WHERE paciente_id = ? AND etapa_al_momento = ? AND tipo_grupo = ?
+    """, (paciente_id, etapa_actual, tipo_grupo))
+    cnt = c.fetchone()[0]
+    conn.close()
+    return cnt
+
+def listar_grupos_paciente(paciente_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("""
+        SELECT id, tipo_grupo, etapa_al_momento, fecha_grupo, facilitador, datos_json, fecha_registro
+        FROM grupos_terapeutos WHERE paciente_id = ? ORDER BY fecha_grupo DESC, id DESC
+    """, (paciente_id,))
     rows = c.fetchall()
     conn.close()
-    nums = []
-    for r in rows:
-        try:
-            val = int(r[0].replace("PAC-", ""))
-            nums.append(val)
-        except Exception:
-            pass
-    siguiente = max(nums) + 1 if nums else 1
-    return f"PAC-{siguiente:03d}"
+    return rows
 
-def verificar_duplicado_nombre(nombre_completo, paciente_id_actual=None):
+# --- FUNCIONES DE CATÁLOGO Y MEDICAMENTOS ---
+def listar_catalogo_medicamentos():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    nom_limpio = nombre_completo.strip().upper()
-    c.execute('SELECT paciente_id, nombre_completo, estatus FROM pacientes')
+    c.execute('SELECT id, nombre_medicamento, presentacion, concentracion, observaciones FROM catalogo_medicamentos ORDER BY nombre_medicamento ASC')
     rows = c.fetchall()
     conn.close()
-    for pid, pnom, est in rows:
-        if paciente_id_actual and pid == paciente_id_actual:
-            continue
-        if pnom.strip().upper() == nom_limpio:
-            return pid, pnom, est
-    return None
+    return rows
 
-# --- REPOSITORIO DE DOCUMENTOS ---
-def guardar_documento_repositorio(carpeta, nombre_archivo, mime_type, bytes_blob, descripcion, usuario):
+def agregar_catalogo_medicamento(nombre, presentacion, concentracion, observaciones):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    f_act = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    c.execute('''
+    try:
+        c.execute('INSERT INTO catalogo_medicamentos (nombre_medicamento, presentacion, concentracion, observaciones) VALUES (?, ?, ?, ?)',
+                  (nombre, presentacion, concentracion, observaciones))
+        conn.commit()
+        res = True
+    except sqlite3.IntegrityError:
+        res = False
+    conn.close()
+    return res
+
+def obtener_medicamentos_paciente(paciente_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('SELECT meds_json, observaciones FROM medicamentos WHERE paciente_id = ?', (paciente_id,))
+    row = c.fetchone()
+    conn.close()
+    if row and row[0]:
+        return json.loads(row[0]), row[1]
+    return [], ""
+
+def guardar_medicamentos_paciente(paciente_id, meds_list, observaciones, usuario_act):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    fecha_actual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    meds_json = json.dumps(meds_list, ensure_ascii=False)
+    c.execute('SELECT paciente_id FROM medicamentos WHERE paciente_id = ?', (paciente_id,))
+    if c.fetchone():
+        c.execute("""
+            UPDATE medicamentos SET meds_json = ?, observaciones = ?, fecha_modificacion = ?, usuario_registro = ?
+            WHERE paciente_id = ?
+        """, (meds_json, observaciones, fecha_actual, usuario_act, paciente_id))
+    else:
+        c.execute("""
+            INSERT INTO medicamentos (paciente_id, meds_json, observaciones, fecha_registro, fecha_modificacion, usuario_registro)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (paciente_id, meds_json, observaciones, fecha_actual, fecha_actual, usuario_act))
+    conn.commit()
+    conn.close()
+
+# --- FUNCIONES DEL REPOSITORIO DE DOCUMENTOS ---
+def guardar_documento_repositorio(carpeta, nombre_archivo, mime_type, bytes_blob, descripcion, usuario_subida):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    fecha_actual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    c.execute("""
         INSERT INTO repositorio_documentos (carpeta, nombre_archivo, mime_type, bytes_blob, descripcion, fecha_subida, usuario_subida)
         VALUES (?, ?, ?, ?, ?, ?, ?)
-    ''', (carpeta, nombre_archivo, mime_type, bytes_blob, descripcion, f_act, usuario))
+    """, (carpeta, nombre_archivo, mime_type, bytes_blob, descripcion, fecha_actual, usuario_subida))
     conn.commit()
     conn.close()
 
@@ -360,9 +475,15 @@ def obtener_documentos_repositorio(carpeta_filtro=None):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     if carpeta_filtro and carpeta_filtro != "Todas las Carpetas":
-        c.execute('SELECT id, carpeta, nombre_archivo, mime_type, bytes_blob, descripcion, fecha_subida, usuario_subida FROM repositorio_documentos WHERE carpeta = ? ORDER BY id DESC', (carpeta_filtro,))
+        c.execute("""
+            SELECT id, carpeta, nombre_archivo, mime_type, bytes_blob, descripcion, fecha_subida, usuario_subida
+            FROM repositorio_documentos WHERE carpeta = ? ORDER BY id DESC
+        """, (carpeta_filtro,))
     else:
-        c.execute('SELECT id, carpeta, nombre_archivo, mime_type, bytes_blob, descripcion, fecha_subida, usuario_subida FROM repositorio_documentos ORDER BY id DESC')
+        c.execute("""
+            SELECT id, carpeta, nombre_archivo, mime_type, bytes_blob, descripcion, fecha_subida, usuario_subida
+            FROM repositorio_documentos ORDER BY id DESC
+        """)
     rows = c.fetchall()
     conn.close()
     return rows
@@ -374,256 +495,7 @@ def eliminar_documento_repositorio(doc_id):
     conn.commit()
     conn.close()
 
-# --- CATÁLOGO DE MEDICAMENTOS ---
-def obtener_catalogo_medicamentos():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('SELECT id, nombre, concentracion, presentacion, descripcion FROM catalogo_medicamentos ORDER BY nombre ASC')
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
-def guardar_medicamento_catalogo(nombre, concentracion, presentacion, descripcion):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''
-        INSERT OR REPLACE INTO catalogo_medicamentos (nombre, concentracion, presentacion, descripcion)
-        VALUES (?, ?, ?, ?)
-    ''', (nombre.strip(), concentracion.strip(), presentacion.strip(), descripcion.strip()))
-    conn.commit()
-    conn.close()
-
-def eliminar_medicamento_catalogo(med_id):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('DELETE FROM catalogo_medicamentos WHERE id = ?', (med_id,))
-    conn.commit()
-    conn.close()
-
-# --- MANEJO DE ENTREVISTAS ---
-def guardar_entrevista(paciente_id, datos, usuario):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    fecha_actual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    datos_json = json.dumps(datos, ensure_ascii=False)
-    
-    c.execute('SELECT paciente_id FROM entrevistas WHERE paciente_id = ?', (paciente_id,))
-    if c.fetchone():
-        c.execute('''
-            UPDATE entrevistas 
-            SET fecha_modificacion = ?, datos_json = ?
-            WHERE paciente_id = ?
-        ''', (fecha_actual, datos_json, paciente_id))
-    else:
-        c.execute('''
-            INSERT INTO entrevistas (paciente_id, fecha_registro, fecha_modificacion, usuario_registro, datos_json)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (paciente_id, fecha_actual, fecha_actual, usuario, datos_json))
-    conn.commit()
-    conn.close()
-
-def obtener_entrevista(paciente_id):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('SELECT datos_json, fecha_registro, fecha_modificacion, usuario_registro FROM entrevistas WHERE paciente_id = ?', (paciente_id,))
-    row = c.fetchone()
-    conn.close()
-    if row:
-        return json.loads(row[0]), row[1], row[2], row[3]
-    return None, None, None, None
-
-# --- MEDICAMENTOS DE PACIENTE ---
-def guardar_medicamentos_paciente(paciente_id, meds_list, obs, usuario):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    f_act = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    meds_json = json.dumps(meds_list, ensure_ascii=False)
-    
-    c.execute('SELECT paciente_id FROM medicamentos WHERE paciente_id = ?', (paciente_id,))
-    if c.fetchone():
-        c.execute('''
-            UPDATE medicamentos 
-            SET meds_json = ?, observaciones = ?, fecha_modificacion = ?, usuario_registro = ?
-            WHERE paciente_id = ?
-        ''', (meds_json, obs, f_act, usuario, paciente_id))
-    else:
-        c.execute('''
-            INSERT INTO medicamentos (paciente_id, meds_json, observaciones, fecha_registro, fecha_modificacion, usuario_registro)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (paciente_id, meds_json, obs, f_act, f_act, usuario))
-    conn.commit()
-    conn.close()
-
-def obtener_medicamentos_paciente(paciente_id):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('SELECT meds_json, observaciones, fecha_modificacion, usuario_registro FROM medicamentos WHERE paciente_id = ?', (paciente_id,))
-    row = c.fetchone()
-    conn.close()
-    if row and row[0]:
-        return json.loads(row[0]), row[1], row[2], row[3]
-    return [], "", None, None
-
-def registrar_entrega_medicamentos(paciente_id, entregado_por, detalle_list):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    f_act = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    detalle_json = json.dumps(detalle_list, ensure_ascii=False)
-    c.execute('''
-        INSERT INTO entregas_medicamentos (paciente_id, fecha_entrega, entregado_por, detalle_json)
-        VALUES (?, ?, ?, ?)
-    ''', (paciente_id, f_act, entregado_por, detalle_json))
-    conn.commit()
-    conn.close()
-
-# --- GRUPOS TERAPÉUTICOS ---
-def guardar_grupo_terapeuto(paciente_id, tipo_grupo, etapa, fecha_g, facilitador, datos, usuario):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    f_act = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    datos_json = json.dumps(datos, ensure_ascii=False)
-    c.execute('''
-        INSERT INTO grupos_terapeutos (paciente_id, tipo_grupo, etapa_al_momento, fecha_grupo, facilitador, datos_json, fecha_registro, usuario_registro)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (paciente_id, tipo_grupo, etapa, fecha_g, facilitador, datos_json, f_act, usuario))
-    conn.commit()
-    conn.close()
-
-def obtener_grupos_paciente(paciente_id):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('SELECT id, tipo_grupo, etapa_al_momento, fecha_grupo, facilitador, datos_json, fecha_registro FROM grupos_terapeutos WHERE paciente_id = ? ORDER BY fecha_grupo DESC, id DESC', (paciente_id,))
-    rows = c.fetchall()
-    conn.close()
-    res = []
-    for r in rows:
-        res.append({
-            "id": r[0],
-            "tipo_grupo": r[1],
-            "etapa": r[2],
-            "fecha_grupo": r[3],
-            "facilitador": r[4],
-            "datos": json.loads(r[5]) if r[5] else {},
-            "fecha_registro": r[6]
-        })
-    return res
-
-def contar_grupos_etapa_paciente(paciente_id, etapa):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('SELECT tipo_grupo, COUNT(*) FROM grupos_terapeutos WHERE paciente_id = ? AND etapa_al_momento = ? GROUP BY tipo_grupo', (paciente_id, etapa))
-    rows = c.fetchall()
-    conn.close()
-    counts = {"Terapia de Grupo": 0, "Aquí y Ahora": 0, "Feedback": 0}
-    for tg, cnt in rows:
-        if tg in counts:
-            counts[tg] = cnt
-    return counts
-
-# --- GESTIÓN DE ETAPAS ---
-ETAPAS_CONFIG = {
-    "ACOGIDA": {"dias": 30, "siguiente": "IDENTIFICACIÓN"},
-    "IDENTIFICACIÓN": {"dias": 60, "siguiente": "ELABORACIÓN"},
-    "ELABORACIÓN": {"dias": 60, "siguiente": "CONSOLIDACIÓN"},
-    "CONSOLIDACIÓN": {"dias": 30, "siguiente": "SERVICIO SOCIAL"},
-    "SERVICIO SOCIAL": {"dias": 30, "siguiente": "GRADUADO"}
-}
-
-def obtener_requisitos_etapa(etapa):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('SELECT id, requisito, es_grupo FROM requisitos_etapas WHERE etapa = ?', (etapa,))
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
-def promover_paciente_etapa(paciente_id, etapa_origen, etapa_destino, usuario):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    f_act = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    c.execute('''
-        UPDATE pacientes 
-        SET etapa_actual = ?, fecha_inicio_etapa = ?, fecha_modificacion = ?
-        WHERE paciente_id = ?
-    ''', (etapa_destino, f_act, f_act, paciente_id))
-    
-    c.execute('''
-        INSERT INTO historial_etapas (paciente_id, etapa_origen, etapa_destino, fecha_cambio, usuario_autoriza)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (paciente_id, etapa_origen, etapa_destino, f_act, usuario))
-    conn.commit()
-    conn.close()
-
-def asignar_hermano_mayor(paciente_id, hermano_mayor_id):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    f_act = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    c.execute('UPDATE pacientes SET hermano_mayor_id = ?, fecha_modificacion = ? WHERE paciente_id = ?', (hermano_mayor_id, f_act, paciente_id))
-    conn.commit()
-    conn.close()
-
-def registrar_suelta_hermano(paciente_id):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    f_act = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    c.execute('UPDATE pacientes SET fecha_suelta_hermano = ?, fecha_modificacion = ? WHERE paciente_id = ?', (f_act, f_act, paciente_id))
-    conn.commit()
-    conn.close()
-
-# --- GENERACIÓN DE PDF ---
-def limpiar_texto(texto):
-    if not texto:
-        return ""
-    return str(texto).encode('latin-1', 'replace').decode('latin-1')
-
-class PDFReporte(FPDF):
-    def header(self):
-        self.set_font('Arial', 'B', 14)
-        self.cell(0, 8, limpiar_texto('🌱 SAWABONA SHIKOBA - COMUNIDAD TERAPÉUTICA'), 0, 1, 'C')
-        self.set_font('Arial', 'I', 9)
-        self.cell(0, 5, limpiar_texto('Sistema de Control Clínico y Seguimiento Individual'), 0, 1, 'C')
-        self.line(10, 23, 200, 23)
-        self.ln(5)
-
-    def footer(self):
-        self.set_y(-15)
-        self.set_font('Arial', 'I', 8)
-        self.cell(0, 10, f'Página {self.page_no()}', 0, 0, 'C')
-
-def generar_pdf_grupos_paciente(paciente_info, grupos):
-    pdf = PDFReporte()
-    pdf.add_page()
-    pdf.set_font('Arial', 'B', 12)
-    
-    p_id, p_nom, f_ing, f_nac, sexo, estatus, t_user, etapa, f_etapa, h_may, f_suelta = paciente_info
-    
-    pdf.cell(0, 7, limpiar_texto(f'EXPEDIENTE DE GRUPOS TERAPÉUTICOS - {p_nom} ({p_id})'), 0, 1, 'L')
-    pdf.set_font('Arial', '', 10)
-    pdf.cell(0, 5, limpiar_texto(f'Etapa Actual: {etapa} | Fecha Ingreso: {f_ing}'), 0, 1, 'L')
-    pdf.ln(4)
-    
-    if not grupos:
-        pdf.cell(0, 8, limpiar_texto('No hay sesiones de grupos terapéuticos registradas para este usuario.'), 0, 1, 'L')
-    else:
-        for g in grupos:
-            pdf.set_fill_color(230, 240, 250)
-            pdf.set_font('Arial', 'B', 10)
-            pdf.cell(0, 7, limpiar_texto(f'• {g["tipo_grupo"]} - Fecha: {g["fecha_grupo"]} (Etapa: {g["etapa"]})'), 1, 1, 'L', True)
-            pdf.set_font('Arial', '', 9)
-            pdf.cell(0, 5, limpiar_texto(f'  Facilitador: {g["facilitador"]} | Registrado: {g["fecha_registro"]}'), 0, 1, 'L')
-            
-            d = g["datos"]
-            for k, v in d.items():
-                if v and str(v).strip():
-                    pdf.set_font('Arial', 'B', 9)
-                    pdf.cell(0, 5, limpiar_texto(f'  {k}:'), 0, 1, 'L')
-                    pdf.set_font('Arial', '', 9)
-                    pdf.multi_cell(0, 4, limpiar_texto(f'    {v}'))
-            pdf.ln(3)
-            
-    return pdf.output(dest='S').encode('latin-1')
-
-# --- CONTROL DE SESIÓN ---
+# --- AUTENTICACIÓN / SESIÓN ---
 if "logged_in" not in st.session_state:
     st.session_state["logged_in"] = False
 if "username" not in st.session_state:
@@ -633,766 +505,895 @@ if "nombre_completo" not in st.session_state:
 if "rol" not in st.session_state:
     st.session_state["rol"] = "Nivel 1 - Administrador"
 
-# --- PANTALLA DE LOGIN ---
 if not st.session_state["logged_in"]:
     st.markdown("<h1 style='text-align: center;'>🌱 Sawabona Shikoba</h1>", unsafe_allow_html=True)
-    st.markdown("<h3 style='text-align: center;'>Sistema de Control y Comunidad Terapéutica</h3>", unsafe_allow_html=True)
-    st.write("")
+    st.markdown("<h3 style='text-align: center;'>Sistema Integral de Control y Comunidad Terapéutica</h3>", unsafe_allow_html=True)
+    st.divider()
     
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
+        st.subheader("🔐 Iniciar Sesión")
         with st.form("login_form"):
-            st.subheader("🔑 Iniciar Sesión")
             user_input = st.text_input("Usuario")
             pass_input = st.text_input("Contraseña", type="password")
-            submit = st.form_submit_button("Ingresar al Sistema", use_container_width=True)
+            submit_login = st.form_submit_button("Ingresar al Sistema", use_container_width=True)
             
-            if submit:
-                usuario_valido = verificar_login(user_input, pass_input)
-                if usuario_valido:
+            if submit_login:
+                res = verificar_login(user_input, pass_input)
+                if res:
                     st.session_state["logged_in"] = True
-                    st.session_state["username"] = usuario_valido[0]
-                    st.session_state["nombre_completo"] = usuario_valido[1]
-                    st.session_state["rol"] = usuario_valido[2] if len(usuario_valido) > 2 and usuario_valido[2] else "Nivel 1 - Administrador"
-                    st.success(f"¡Bienvenido {usuario_valido[1]}!")
-                    st.toast("🎉 ¡Sesión iniciada correctamente!")
+                    st.session_state["username"] = res[0]
+                    st.session_state["nombre_completo"] = res[1]
+                    st.session_state["rol"] = res[2] if len(res) > 2 and res[2] else "Nivel 1 - Administrador"
+                    st.toast(f"¡Bienvenido, {res[1]}!", icon="🎉")
                     st.rerun()
                 else:
-                    st.error("Usuario o contraseña incorrectos.")
+                    st.error("❌ Usuario o contraseña incorrectos.")
+        
         st.info("💡 **Credenciales por defecto**: Usuario: `admin` | Contraseña: `admin123`")
+    st.stop()
 
-else:
-    # --- BARRA LATERAL Y NAVEGACIÓN ---
-    st.sidebar.title("🌱 Sawabona Shikoba")
-    st.sidebar.write(f"👤 **Usuario**: {st.session_state['nombre_completo']}")
-    st.sidebar.caption(f"🛡️ **Rol**: {st.session_state['rol']}")
-    
-    opciones_menu = [
-        "📝 Nueva Entrevista / Editar",
-        "🔍 Buscar y Listar Pacientes",
-        "👤 Registro y Edición de Usuarios",
-        "🎯 Gestión de Etapas & Proceso",
-        "🗣️ Grupos Terapéuticos",
-        "💊 Control de Medicamentos y Dosis",
-        "🚚 Entrega de Medicamentos"
-    ]
-    
-    # Módulos Exclusivos para Administrador
-    if es_admin():
-        opciones_menu.append("📁 Repositorio de Documentos")
-        opciones_menu.append("⚙️ Configuración & Seguridad")
-        opciones_menu.append("📦 Respaldo y Restauración")
-        
-    menu = st.sidebar.radio("Navegación", opciones_menu)
-    
-    if st.sidebar.button("🚪 Cerrar Sesión", use_container_width=True):
-        st.session_state["logged_in"] = False
-        st.rerun()
+# --- BARRA LATERAL (NAVEGACIÓN Y ROL) ---
+st.sidebar.title("🌱 Sawabona Shikoba")
+st.sidebar.markdown(f"👤 **Usuario**: {st.session_state['nombre_completo']}")
+st.sidebar.caption(f"🔑 **Rol**: {st.session_state['rol']}")
 
-    # --- SECCIÓN 1: NUEVA ENTREVISTA / EDITAR ---
-    if menu == "📝 Nueva Entrevista / Editar":
-        st.title("📋 Entrevista Inicial de Consejería")
-        st.caption("Formulario de evaluación digital de consumo de sustancias")
+if st.sidebar.button("🚪 Cerrar Sesión", use_container_width=True):
+    st.session_state["logged_in"] = False
+    st.session_state["username"] = ""
+    st.session_state["nombre_completo"] = ""
+    st.session_state["rol"] = ""
+    st.rerun()
+
+st.sidebar.divider()
+
+opciones_menu = [
+    "🎯 Gestión de Etapas & Proceso",
+    "👤 Registro y Edición de Usuarios",
+    "🗣️ Grupos Terapéuticos",
+    "📝 Entrevista Inicial de Consejería",
+    "💊 Control de Medicamentos & Dosis",
+    "🚚 Entrega de Medicamentos",
+    "📦 Respaldo y Restauración"
+]
+
+if es_admin():
+    opciones_menu.append("📁 Repositorio de Documentos")
+    opciones_menu.append("⚙️ Configuración & Seguridad")
+
+menu = st.sidebar.radio("Navegación", opciones_menu)
+
+# ==============================================================================
+# MÓDULO 1: 🎯 GESTIÓN DE ETAPAS & PROCESO (CON REZAGOS Y CHECKLIST)
+# ==============================================================================
+if menu == "🎯 Gestión de Etapas & Proceso":
+    st.title("🎯 Gestión de Etapas & Proceso Individual")
+    st.markdown("Seguimiento del avance en las 5 etapas del tratamiento, alertas de tiempo y control de rezago.")
+    
+    pacs = listar_todos_pacientes()
+    solo_pacientes = [p for p in pacs if p[6] == 'Paciente' and p[5] == 'A']
+    
+    if not solo_pacientes:
+        st.warning("No hay pacientes activos registrados en el sistema.")
+    else:
+        tab_avance, tab_hermano, tab_historial = st.tabs([
+            "📊 Evaluador de Etapa y Rezagos",
+            "🤝 Hermano Menor & Mayor",
+            "📜 Historial de Cambios de Etapa"
+        ])
         
-        pacientes_lista = listar_pacientes_todos(solo_activos=False)
-        opciones_pac = ["-- Crear Folio Nuevo / Teclear Folio --"] + [f"{p[0]} - {p[1]}" for p in pacientes_lista]
-        
-        pac_sel = st.selectbox("🔑 SELECCIONAR PACIENTE REGISTRADO O TECLEAR FOLIO", opciones_pac)
-        
-        if pac_sel.startswith("--"):
-            paciente_id_input = st.text_input("Folio o Número de Paciente *", value="").strip().upper()
-        else:
-            paciente_id_input = pac_sel.split(" - ")[0]
+        # --- TAB 1: EVALUADOR DE ETAPA Y REZAGOS ---
+        with tab_avance:
+            opcs_pacientes = [f"{p[0]} - {p[1]} (Etapa actual: {p[7]})" for p in solo_pacientes]
+            sel_pac_str = st.selectbox("🔑 Selecciona el Residente a Evaluar", opcs_pacientes)
+            sel_pid = sel_pac_str.split(" - ")[0]
             
-        datos_existentes = {}
-        if paciente_id_input:
-            datos_cargados, f_reg, f_mod, u_reg = obtener_entrevista(paciente_id_input)
-            if datos_cargados:
-                st.success(f"📌 Expediente cargado. Registrado el {f_reg} por {u_reg}. Última modificación: {f_mod}")
-                datos_existentes = datos_cargados
-            else:
-                st.info("🆕 Folio nuevo. Complete los datos para registrar un nuevo expediente.")
+            p_data = obtener_paciente(sel_pid)
+            # p_data: (id, nombre, f_ingreso, f_nac, sexo, estatus, tipo, etapa_act, f_ini_etapa, h_mayor, f_suelta)
+            p_id, p_nom, p_fing, p_fnac, p_sexo, p_est, p_tipo, p_etapa, p_fini_etapa, p_hmayor, p_fsuelta = p_data
+            
+            # Cálculo de fechas
+            hoy = date.today()
+            try:
+                dt_fing = datetime.strptime(p_fing, "%Y-%m-%d").date()
+            except Exception:
+                dt_fing = hoy
+            
+            try:
+                dt_fini_etapa = datetime.strptime(p_fini_etapa, "%Y-%m-%d").date() if p_fini_etapa else dt_fing
+            except Exception:
+                dt_fini_etapa = dt_fing
 
-        with st.form("formulario_entrevista"):
+            dias_totales_clinica = (hoy - dt_fing).days
+            dias_en_etapa_actual = (hoy - dt_fini_etapa).days
+            
+            # Duraciones estándar de etapas
+            duracion_etapas = {
+                'ACOGIDA': 30,
+                'IDENTIFICACIÓN': 60,
+                'ELABORACIÓN': 60,
+                'CONSOLIDACIÓN': 30,
+                'SERVICIO SOCIAL': 30
+            }
+            
+            duracion_req = duracion_etapas.get(p_etapa, 30)
+            
+            # ALERTAS DE TIEMPO Y REZAGO / ESTANCAMIENTO
+            col_m1, col_m2, col_m3 = st.columns(3)
+            col_m1.metric("🗓️ Días Totales en Comunidad", f"{dias_totales_clinica} días", help="Días desde la fecha de ingreso real")
+            col_m2.metric("⏱️ Días en Etapa Actual", f"{dias_en_etapa_actual} / {duracion_req} días", help=f"Días desde el inicio de {p_etapa}")
+            
+            dias_restantes = duracion_req - dias_en_etapa_actual
+            
+            if dias_en_etapa_actual > duracion_req:
+                excedido = dias_en_etapa_actual - duracion_req
+                col_m3.metric("⚠️ Estado de Tiempo", "EN REZAGO", f"+{excedido} días excedidos", delta_color="inverse")
+                st.error(f"🚨 **ALERTA DE REZAGO / ESTANCAMIENTO CLÍNICO**: El paciente **{p_nom}** lleva **{dias_totales_clinica} días internado** en la comunidad y suma **{dias_en_etapa_actual} días en la Etapa {p_etapa}** (Duración estimada: {duracion_req} días). Se ha excedido por **+{excedido} días** sin haber cumplido su promoción.")
+            elif dias_restantes <= 5:
+                col_m3.metric("🚨 Estado de Tiempo", "PRÓXIMO A CUMPLIR", f"{dias_restantes} días restantes")
+                st.warning(f"⏰ **ALERTA TEMPRANA DE CAMBIO DE ETAPA**: **{p_nom}** está a **{dias_restantes} días** de cumplir los {duracion_req} días programados para la etapa **{p_etapa}**. Por favor revisa el checklist de requisitos para preparar su evaluación.")
+            else:
+                col_m3.metric("✅ Estado de Tiempo", "EN TIEMPO NORMAL", f"{dias_restantes} días restantes")
+
+            # Barra de progreso
+            prog_val = min(1.0, max(0.0, dias_en_etapa_actual / duracion_req))
+            st.progress(prog_val, text=f"Avance en días de {p_etapa}: {dias_en_etapa_actual} de {duracion_req} días ({int(prog_val * 100)}%)")
+            
+            st.divider()
+            st.subheader(f"📋 Checklist de Requisitos y Diagnóstico de Bloqueo: Etapa {p_etapa}")
+            
+            # Cargar requisitos configurados de la base de datos
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            c.execute('SELECT id, requisito, es_grupo FROM requisitos_etapas WHERE etapa = ?', (p_etapa,))
+            reqs_etapa = c.fetchall()
+            conn.close()
+            
+            items_completados = 0
+            items_totales = len(reqs_etapa)
+            
+            with st.form(f"form_checklist_{p_id}_{p_etapa}"):
+                st.markdown("##### Marca los requisitos completados o verifica el conteo automático de grupos:")
+                
+                chk_states = {}
+                for req_id, req_texto, es_grupo in reqs_etapa:
+                    if es_grupo:
+                        # Extraer tipo de grupo del texto
+                        tipo_g = "Terapia de Grupo"
+                        if "Aquí y Ahora" in req_texto:
+                            tipo_g = "Aquí y Ahora"
+                        elif "Feedback" in req_texto:
+                            tipo_g = "Feedback"
+                        
+                        cnt_g = contar_grupos_paciente_etapa(p_id, p_etapa, tipo_g)
+                        
+                        # Determinar meta requerida
+                        meta_g = 2
+                        if "4" in req_texto:
+                            meta_g = 4
+                        elif "15" in req_texto:
+                            meta_g = 15
+                        
+                        es_cumplido = (cnt_g >= meta_g)
+                        if es_cumplido:
+                            items_completados += 1
+                            st.success(f"✅ **{req_texto}**: Completado ({cnt_g} / {meta_g} sesiones registradas en sistema)")
+                        else:
+                            st.error(f"❌ **{req_texto}**: PENDIENTE ({cnt_g} / {meta_g} sesiones registradas) ➔ *Faltan {meta_g - cnt_g} grupos*")
+                        chk_states[req_id] = es_cumplido
+                    else:
+                        c_val = st.checkbox(f"📌 {req_texto}", key=f"chk_{p_id}_{req_id}")
+                        if c_val:
+                            items_completados += 1
+                        chk_states[req_id] = c_val
+                
+                st.divider()
+                pct_checklist = (items_completados / items_totales * 100) if items_totales > 0 else 100
+                st.markdown(f"**Porcentaje de Requisitos Cumplidos**: `{items_completados} / {items_totales}` (**{pct_checklist:.0f}%**)")
+                
+                etapas_orden = ['ACOGIDA', 'IDENTIFICACIÓN', 'ELABORACIÓN', 'CONSOLIDACIÓN', 'SERVICIO SOCIAL']
+                idx_curr = etapas_orden.index(p_etapa) if p_etapa in etapas_orden else 0
+                siguiente_etapa = etapas_orden[idx_curr + 1] if idx_curr + 1 < len(etapas_orden) else None
+                
+                puedes_promover = (items_completados == items_totales) and (siguiente_etapa is not None) and puede_escribir()
+                
+                if siguiente_etapa is None:
+                    st.info("🎉 El paciente se encuentra en la etapa final (**SERVICIO SOCIAL**).")
+                    btn_promover = st.form_submit_button("🏁 Proceso de Etapas Completado", disabled=True)
+                else:
+                    btn_promover = st.form_submit_button(f"🚀 Promover a Siguiente Etapa: {siguiente_etapa}", disabled=not puedes_promover, use_container_width=True)
+                    if not puedes_promover:
+                        st.caption("🔒 *El botón de promoción se habilitará únicamente cuando todos los requisitos del checklist estén marcados al 100%.*")
+                    
+                    if btn_promover:
+                        promover_paciente_etapa(p_id, p_etapa, siguiente_etapa, st.session_state["username"])
+                        st.success(f"🎉 ¡El paciente **{p_nom}** ha sido promovido exitosamente a la etapa **{siguiente_etapa}**!")
+                        st.toast(f"¡Promoción registrada para {p_nom}!", icon="🎉")
+                        st.balloons()
+                        st.rerun()
+
+        # --- TAB 2: HERMANO MENOR & MAYOR ---
+        with tab_hermano:
+            st.subheader("🤝 Asignación y Control de Hermano Menor / Mayor")
+            st.caption("Durante los primeros 15 días en ACOGIDA, el residente ingresa como Hermano Menor y se le asigna un Hermano Mayor.")
+            
+            p_hermanos = [p for p in solo_pacientes if p[7] == 'ACOGIDA']
+            if not p_hermanos:
+                st.info("No hay residentes actualmente en la etapa de **ACOGIDA**.")
+            else:
+                for ph in p_hermanos:
+                    ph_id, ph_nom, ph_fing = ph[0], ph[1], ph[2]
+                    ph_hmayor, ph_fsuelta = ph[9], ph[10]
+                    
+                    dt_fing = datetime.strptime(ph_fing, "%Y-%m-%d").date() if ph_fing else hoy
+                    dt_suelta_prog = dt_fing + timedelta(days=15)
+                    dias_acogida = (hoy - dt_fing).days
+                    
+                    with st.expander(f"👤 **{ph_nom}** ({ph_id}) - {dias_acogida} días en Acogida"):
+                        st.write(f"- **Fecha de Ingreso**: {ph_fing}")
+                        st.write(f"- **Fecha Programada de Suelta de Hermano Mayor**: {dt_suelta_prog.strftime('%Y-%m-%d')} (A los 15 días)")
+                        
+                        if ph_fsuelta:
+                            st.success(f"✅ **Hermano Mayor Soltado el**: {ph_fsuelta}")
+                        else:
+                            if dias_acogida >= 15:
+                                st.warning("⚠️ El residente ya cumplió sus 15 días de acompañamiento. Ya puede ser soltado.")
+                            else:
+                                st.info(f"⏳ Le faltan {15 - dias_acogida} días para cumplir el periodo de Hermano Menor.")
+                            
+                            posibles_mayores = [f"{pm[0]} - {pm[1]} ({pm[7]})" for pm in pacs if pm[0] != ph_id]
+                            sel_hmayor = st.selectbox("Asignar Hermano Mayor", posibles_mayores, key=f"sel_hm_{ph_id}")
+                            
+                            col_h1, col_h2 = st.columns(2)
+                            with col_h1:
+                                if st.button("💾 Asignar Hermano Mayor", key=f"btn_hm_{ph_id}"):
+                                    hm_id = sel_hmayor.split(" - ")[0]
+                                    asignar_hermano_mayor(ph_id, hm_id)
+                                    st.success("✅ Hermano Mayor asignado.")
+                                    st.toast("Hermano Mayor asignado.", icon="✅")
+                                    st.rerun()
+                            with col_h2:
+                                if st.button("🔓 Marcar que Hermano Mayor lo Suelta", key=f"btn_suelta_{ph_id}"):
+                                    registrar_suelta_hermano(ph_id)
+                                    st.success("✅ Suelta registrada.")
+                                    st.toast("Suelta de Hermano Mayor registrada.", icon="🔓")
+                                    st.rerun()
+
+        # --- TAB 3: HISTORIAL DE CAMBIOS DE ETAPA ---
+        with tab_historial:
+            st.subheader("📜 Historial Registro de Cambios de Etapa")
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            c.execute("""
+                SELECT h.id, p.nombre_completo, h.etapa_origen, h.etapa_destino, h.fecha_cambio, h.usuario_autoriza
+                FROM historial_etapas h
+                JOIN pacientes p ON h.paciente_id = p.paciente_id
+                ORDER BY h.id DESC
+            """)
+            h_rows = c.fetchall()
+            conn.close()
+            
+            if not h_rows:
+                st.info("No se han registrado promociones de etapa aún en el sistema.")
+            else:
+                st.dataframe(
+                    [{"ID": r[0], "Paciente": r[1], "Origen": r[2], "Destino": r[3], "Fecha Cambio": r[4], "Autorizó": r[5]} for r in h_rows],
+                    use_container_width=True
+                )
+
+# ==============================================================================
+# MÓDULO 2: 👤 REGISTRO Y EDICIÓN DE USUARIOS
+# ==============================================================================
+elif menu == "👤 Registro y Edición de Usuarios":
+    st.title("👤 Registro y Edición de Usuarios")
+    st.markdown("Gestión de expedientes de Pacientes/Residentes y Servidores/Staff de la comunidad.")
+    
+    modo = st.radio("Modo de Operación", ["🆕 Registrar Nuevo Usuario", "✏️ Modificar / Editar Usuario Existente"], horizontal=True)
+    
+    pacs_all = listar_todos_pacientes()
+    
+    if modo == "✏️ Modificar / Editar Usuario Existente" and not pacs_all:
+        st.warning("No hay usuarios registrados en el sistema para editar.")
+    else:
+        edit_data = None
+        if modo == "✏️ Modificar / Editar Usuario Existente":
+            opcs_edit = [f"{p[0]} - {p[1]} ({p[6]})" for p in pacs_all]
+            sel_u_edit = st.selectbox("🔑 Selecciona el Usuario a Editar", opcs_edit)
+            edit_pid = sel_u_edit.split(" - ")[0]
+            edit_data = obtener_paciente(edit_pid)
+        
+        # Clave dinámica para refrescar el formulario al cambiar de usuario
+        form_key = f"user_form_{edit_data[0]}" if edit_data else "user_form_new"
+        
+        with st.form(form_key):
+            st.subheader("📋 Datos del Usuario")
+            
+            if edit_data:
+                u_id, u_nom, u_fing, u_fnac, u_sex, u_est, u_tipo, u_etapa, u_fini_etapa, _, _ = edit_data
+                val_id = u_id
+                val_nom = u_nom
+                val_tipo = u_tipo
+                val_sex = u_sex
+                val_est = u_est
+                val_etapa = u_etapa
+                try:
+                    val_fing = datetime.strptime(u_fing, "%Y-%m-%d").date()
+                except Exception:
+                    val_fing = date.today()
+                try:
+                    val_fnac = datetime.strptime(u_fnac, "%Y-%m-%d").date()
+                except Exception:
+                    val_fnac = date(1990, 1, 1)
+                try:
+                    val_fini_etapa = datetime.strptime(u_fini_etapa, "%Y-%m-%d").date() if u_fini_etapa else val_fing
+                except Exception:
+                    val_fini_etapa = val_fing
+            else:
+                val_id = obtener_siguiente_folio()
+                val_nom = ""
+                val_tipo = "Paciente"
+                val_sex = "Masculino"
+                val_est = "A"
+                val_etapa = "ACOGIDA"
+                val_fing = date.today()
+                val_fnac = date(1995, 1, 1)
+                val_fini_etapa = date.today()
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.text_input("Folio / ID", value=val_id, disabled=True)
+                reg_nom = st.text_input("Nombre Completo", value=val_nom)
+                reg_tipo = st.selectbox("Tipo de Usuario", ["Paciente", "Servidor / Staff"], index=0 if val_tipo == "Paciente" else 1)
+                reg_sexo = st.selectbox("Sexo", ["Masculino", "Femenino", "Otro"], index=["Masculino", "Femenino", "Otro"].index(val_sex) if val_sex in ["Masculino", "Femenino", "Otro"] else 0)
+            
+            with col2:
+                reg_fing = st.date_input("Fecha de Ingreso Real a la Comunidad", value=val_fing, min_value=date(2000, 1, 1))
+                reg_etapa = st.selectbox("Etapa Actual", ["ACOGIDA", "IDENTIFICACIÓN", "ELABORACIÓN", "CONSOLIDACIÓN", "SERVICIO SOCIAL"], index=["ACOGIDA", "IDENTIFICACIÓN", "ELABORACIÓN", "CONSOLIDACIÓN", "SERVICIO SOCIAL"].index(val_etapa) if val_etapa in ["ACOGIDA", "IDENTIFICACIÓN", "ELABORACIÓN", "CONSOLIDACIÓN", "SERVICIO SOCIAL"] else 0)
+                reg_fini_etapa = st.date_input("Fecha de Inicio de la Etapa Actual", value=val_fini_etapa, min_value=date(2000, 1, 1), help="Si el residente ya estaba internado en esta etapa, selecciona la fecha aproximada en que inició su etapa actual.")
+                reg_fnac = st.date_input("Fecha de Nacimiento", value=val_fnac, min_value=date(1920, 1, 1))
+                reg_estatus = st.selectbox("Estatus", ["A - Activo", "B - Inactivo / Bloqueado"], index=0 if val_est == "A" else 1)
+
+            st.divider()
+            btn_guardar_u = st.form_submit_button("💾 Guardar Usuario", use_container_width=True, disabled=not puede_escribir())
+            
+            if btn_guardar_u:
+                if not reg_nom.strip():
+                    st.error("⚠️ El Nombre Completo es obligatorio.")
+                else:
+                    est_code = "A" if "A" in reg_estatus else "B"
+                    dup = verificar_duplicado_nombre(reg_nom, paciente_id_actual=val_id if edit_data else None)
+                    if dup and modo == "🆕 Registrar Nuevo Usuario":
+                        st.error(f"❌ Ya existe un usuario con el nombre '**{dup[1]}**' registrado bajo el Folio **{dup[0]}**.")
+                    else:
+                        guardar_usuario_paciente(
+                            val_id, reg_nom, reg_fing, reg_fnac, reg_sexo, est_code, reg_tipo, reg_etapa, reg_fini_etapa, st.session_state["username"]
+                        )
+                        st.success(f"🎉 ¡Usuario **{reg_nom}** ({val_id}) guardado correctamente en la base de datos!")
+                        st.toast("Usuario guardado correctamente.", icon="🎉")
+                        st.balloons()
+                        st.rerun()
+
+# ==============================================================================
+# MÓDULO 3: 🗣️ GRUPOS TERAPÉUTICOS
+# ==============================================================================
+elif menu == "🗣️ Grupos Terapéuticos":
+    st.title("🗣️ Registro de Grupos Terapéuticos")
+    st.markdown("Captura de sesiones de Terapia de Grupo, Aquí y Ahora, y Feedback.")
+    
+    pacs_g = [p for p in listar_todos_pacientes() if p[5] == 'A' and p[6] == 'Paciente']
+    
+    if not pacs_g:
+        st.warning("No hay pacientes activos registrados en el sistema.")
+    else:
+        tab_reg_g, tab_hist_g = st.tabs(["📝 Registrar Sesión de Grupo", "📜 Historial e Impresión PDF"])
+        
+        with tab_reg_g:
+            opcs_g = [f"{p[0]} - {p[1]} (Etapa: {p[7]})" for p in pacs_g]
+            sel_pac_g = st.selectbox("🔑 Selecciona el Paciente", opcs_g)
+            pid_g = sel_pac_g.split(" - ")[0]
+            p_obj = obtener_paciente(pid_g)
+            
+            tipo_g = st.selectbox("Tipo de Grupo", ["Terapia de Grupo", "Aquí y Ahora", "Feedback"])
+            
+            with st.form("form_grupo_terapeutico"):
+                col_g1, col_g2 = st.columns(2)
+                with col_g1:
+                    st.text_input("Folio del Paciente", value=p_obj[0], disabled=True)
+                    st.text_input("Nombre del Paciente", value=p_obj[1], disabled=True)
+                    st.text_input("Etapa al Momento", value=p_obj[7], disabled=True)
+                with col_g2:
+                    f_grupo = st.date_input("Fecha del Grupo", value=date.today())
+                    facilitador = st.text_input("Nombre del Facilitador / Staff")
+                
+                st.divider()
+                datos_dict = {}
+                if tipo_g in ["Terapia de Grupo", "Aquí y Ahora"]:
+                    datos_dict["Compartimiento"] = st.text_area("Compartimiento (Texto largo)")
+                    datos_dict["Observaciones"] = st.text_area("Observaciones")
+                    datos_dict["Devoluciones"] = st.text_area("Devoluciones")
+                    datos_dict["Como_se_queda"] = st.text_area("¿Cómo se queda y a qué se compromete?")
+                else: # Feedback
+                    datos_dict["Logros"] = st.text_area("Logros (Texto largo)")
+                    datos_dict["Dificultades"] = st.text_area("Dificultades (Texto largo)")
+                    datos_dict["Observaciones"] = st.text_area("Observaciones")
+                    datos_dict["Devoluciones"] = st.text_area("Devoluciones")
+                    datos_dict["Como_se_queda"] = st.text_area("¿Cómo se queda y a qué se compromete?")
+                
+                btn_g = st.form_submit_button("💾 Guardar Sesión de Grupo", use_container_width=True, disabled=not puede_escribir())
+                if btn_g:
+                    if not facilitador.strip():
+                        st.error("⚠️ Debe ingresar el nombre del facilitador.")
+                    else:
+                        guardar_grupo_terapeutico(
+                            p_obj[0], tipo_g, p_obj[7], f_grupo.strftime("%Y-%m-%d"), facilitador, datos_dict, st.session_state["username"]
+                        )
+                        st.success(f"🎉 ¡Sesión de **{tipo_g}** registrada exitosamente para **{p_obj[1]}**!")
+                        st.toast("Sesión de grupo guardada.", icon="🎉")
+                        st.balloons()
+                        st.rerun()
+
+        with tab_hist_g:
+            opcs_gh = [f"{p[0]} - {p[1]}" for p in pacs_g]
+            sel_gh = st.selectbox("🔑 Selecciona el Paciente para Ver Historial", opcs_gh)
+            pid_gh = sel_gh.split(" - ")[0]
+            
+            p_gh_obj = obtener_paciente(pid_gh)
+            list_g = listar_grupos_paciente(pid_gh)
+            
+            if not list_g:
+                st.info(f"No hay sesiones de grupo registradas para {p_gh_obj[1]}.")
+            else:
+                st.markdown(f"#### Total de sesiones registradas: `{len(list_g)}`")
+                for r in list_g:
+                    # r: (id, tipo_grupo, etapa_al_momento, fecha_grupo, facilitador, datos_json, fecha_registro)
+                    with st.expander(f"🗣️ **{r[1]}** | Fecha: {r[3]} | Etapa: {r[2]} | Facilitador: {r[4]}"):
+                        d_j = json.loads(r[5])
+                        for k, v in d_j.items():
+                            st.write(f"**{k.replace('_', ' ')}**: {v}")
+
+# ==============================================================================
+# MÓDULO 4: 📝 ENTREVISTA INICIAL DE CONSEJERÍA
+# ==============================================================================
+elif menu == "📝 Entrevista Inicial de Consejería":
+    st.title("📝 Entrevista Inicial de Consejería")
+    pacs_ent = [p for p in listar_todos_pacientes() if p[6] == 'Paciente']
+    
+    if not pacs_ent:
+        st.warning("No hay pacientes registrados.")
+    else:
+        opcs_e = [f"{p[0]} - {p[1]}" for p in pacs_ent]
+        sel_e = st.selectbox("🔑 Selecciona el Paciente", opcs_e)
+        pid_e = sel_e.split(" - ")[0]
+        
+        # Cargar entrevista si existe
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute('SELECT datos_json FROM entrevistas WHERE paciente_id = ?', (pid_e,))
+        e_row = c.fetchone()
+        conn.close()
+        
+        datos_e = json.loads(e_row[0]) if e_row and e_row[0] else {}
+        
+        with st.form("form_entrevista_inicial"):
             tab1, tab2, tab3, tab4, tab5 = st.tabs([
-                "1. Datos Generales",
-                "2. Consumo de Sustancias",
-                "3. Disposición al Cambio",
-                "4. Entorno y Riesgos",
-                "5. Observaciones y Firma"
+                "1. Demografía", "2. Consumo Sustancias", "3. Disposición al Cambio", "4. Entorno / Riesgo", "5. Observaciones"
             ])
             
             with tab1:
-                st.subheader("Datos Socio-Demográficos Basales")
-                c1, c2 = st.columns(2)
-                with c1:
-                    dependientes_flag = st.selectbox("¿Alguien depende económicamente de usted?", ["NO", "SÍ"], 
-                                                     index=1 if datos_existentes.get("dependientes_flag") == "SÍ" else 0)
-                    dependientes_quienes = st.text_input("¿Quiénes o quiénes?", value=datos_existentes.get("dependientes_quienes", ""))
-                with c2:
-                    pareja_flag = st.selectbox("¿Tiene pareja?", ["NO", "SÍ"],
-                                               index=1 if datos_existentes.get("pareja_flag") == "SÍ" else 0)
-                    pareja_tiempo = st.text_input("Tiempo de relación", value=datos_existentes.get("pareja_tiempo", ""))
-
+                e_empleo = st.text_input("Ocupación / Empleo", value=datos_e.get("empleo", ""))
+                e_vivienda = st.text_input("Situación de Vivienda", value=datos_e.get("vivienda", ""))
+                e_financiero = st.text_input("Responsabilidades Financieras", value=datos_e.get("financiero", ""))
+            
             with tab2:
-                st.subheader("Tabla de Consumo de Sustancias")
-                sustancias_lista = ["ALCOHOL", "CANNABIS", "COCAÍNA", "METANFETAMINA", "ALUCINÓGENOS", "INHALABLES", "TABACO"]
-                tabla_consumo_guardada = datos_existentes.get("tabla_consumo", {})
-                tabla_consumo_input = {}
-                
-                for sust in sustancias_lista:
-                    st.markdown(f"**{sust}**")
-                    s_data = tabla_consumo_guardada.get(sust, {})
-                    col_a, col_b, col_c, col_d, col_e, col_f = st.columns([1, 1.5, 1.5, 1.5, 1, 1.5])
-                    with col_a:
-                        c_val = st.checkbox("Consume", value=s_data.get("consumo") == "SÍ", key=f"c_{sust}")
-                    with col_b:
-                        forma_val = st.text_input("Forma", value=s_data.get("forma", ""), key=f"forma_{sust}")
-                    with col_c:
-                        frec_val = st.text_input("Frecuencia", value=s_data.get("frecuencia", ""), key=f"frec_{sust}")
-                    with col_d:
-                        cant_val = st.text_input("Cantidad", value=s_data.get("cantidad", ""), key=f"cant_{sust}")
-                    with col_e:
-                        edad_val = st.text_input("Edad Inicio", value=s_data.get("edad_inicio", ""), key=f"edad_{sust}")
-                    with col_f:
-                        lugar_val = st.text_input("Lugar Consumo", value=s_data.get("lugar", ""), key=f"lugar_{sust}")
-                        
-                    tabla_consumo_input[sust] = {
-                        "consumo": "SÍ" if c_val else "NO",
-                        "forma": forma_val, "frecuencia": frec_val, "cantidad": cant_val,
-                        "edad_inicio": edad_val, "lugar": lugar_val
-                    }
-
+                e_sustancias = st.text_area("Sustancias de Consumo (Frecuencia, cantidad, detonantes)", value=datos_e.get("sustancias", ""))
+                e_sintomas = st.text_area("Síntomas de Abstinencia / Pérdida de Control", value=datos_e.get("sintomas", ""))
+            
             with tab3:
-                st.subheader("Evaluación de Disposición al Cambio")
-                motivo_consulta = st.text_area("Motivo de consulta principal", value=datos_existentes.get("motivo_consulta", ""))
-                intentos_previos = st.text_area("Intentos previos de abstinencia y tratamiento", value=datos_existentes.get("intentos_previos", ""))
-
+                e_motivacion = st.text_area("Motivación para el Cambio / Periodos de Sobriedad Previo", value=datos_e.get("motivacion", ""))
+            
             with tab4:
-                st.subheader("Entorno Familiar y Factores de Riesgo")
-                apoyo_familiar = st.text_area("Red de apoyo familiar y social", value=datos_existentes.get("apoyo_familiar", ""))
-                riesgos_observados = st.text_area("Riesgos identificados (violencia, salud, legal)", value=datos_existentes.get("riesgos_observados", ""))
-
+                e_familia = st.text_area("Dinámica Familiar y Entorno Social", value=datos_e.get("familia", ""))
+            
             with tab5:
-                st.subheader("Observaciones Finales y Firma del Evaluador")
-                obs_finales = st.text_area("Observaciones clínicas finales", value=datos_existentes.get("obs_finales", ""))
-                evaluador_nombre = st.text_input("Nombre del Evaluador / Consejero", value=datos_existentes.get("evaluador_nombre", st.session_state["nombre_completo"]))
-
-            disabled_btn = es_solo_lectura()
-            btn_guardar_e = st.form_submit_button("💾 Guardar Expediente de Consejería", use_container_width=True, disabled=disabled_btn)
+                e_obs = st.text_area("Observaciones del Consejero / Plan Clínico Inicial", value=datos_e.get("observaciones", ""))
             
-            if btn_guardar_e:
-                if not paciente_id_input:
-                    st.error("⚠️ El Folio del Paciente es obligatorio.")
+            btn_guardar_ent = st.form_submit_button("💾 Guardar Entrevista Inicial", use_container_width=True, disabled=not puede_escribir())
+            
+            if btn_guardar_ent:
+                d_save = {
+                    "empleo": e_empleo, "vivienda": e_vivienda, "financiero": e_financiero,
+                    "sustancias": e_sustancias, "sintomas": e_sintomas, "motivacion": e_motivacion,
+                    "familia": e_familia, "observaciones": e_obs
+                }
+                conn = sqlite3.connect(DB_FILE)
+                c = conn.cursor()
+                f_act = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                c.execute('SELECT paciente_id FROM entrevistas WHERE paciente_id = ?', (pid_e,))
+                if c.fetchone():
+                    c.execute('UPDATE entrevistas SET datos_json = ?, fecha_modificacion = ? WHERE paciente_id = ?',
+                              (json.dumps(d_save, ensure_ascii=False), f_act, pid_e))
                 else:
-                    datos_completos = {
-                        "dependientes_flag": dependientes_flag, "dependientes_quienes": dependientes_quienes,
-                        "pareja_flag": pareja_flag, "pareja_tiempo": pareja_tiempo,
-                        "tabla_consumo": tabla_consumo_input, "motivo_consulta": motivo_consulta,
-                        "intentos_previos": intentos_previos, "apoyo_familiar": apoyo_familiar,
-                        "riesgos_observados": riesgos_observados, "obs_finales": obs_finales,
-                        "evaluador_nombre": evaluador_nombre
-                    }
-                    guardar_entrevista(paciente_id_input, datos_completos, st.session_state["username"])
-                    st.success(f"✅ ¡Expediente {paciente_id_input} guardado correctamente!")
-                    st.toast("🎉 ¡Expediente de consejería guardado exitosamente!")
+                    c.execute('INSERT INTO entrevistas (paciente_id, fecha_registro, fecha_modificacion, usuario_registro, datos_json) VALUES (?, ?, ?, ?, ?)',
+                              (pid_e, f_act, f_act, st.session_state["username"], json.dumps(d_save, ensure_ascii=False)))
+                conn.commit()
+                conn.close()
+                st.success("🎉 ¡Entrevista guardada correctamente!")
+                st.toast("Entrevista guardada.", icon="🎉")
 
-    # --- SECCIÓN 2: BUSCAR Y LISTAR PACIENTES ---
-    elif menu == "🔍 Buscar y Listar Pacientes":
-        st.title("🔍 Registro General de Residentes")
-        pacientes = listar_pacientes_todos(solo_activos=False)
-        
-        if not pacientes:
-            st.warning("No hay pacientes registrados aún en el sistema.")
+# ==============================================================================
+# MÓDULO 5: 💊 CONTROL DE MEDICAMENTOS & DOSIS (CON CATÁLOGO Y REPORTES)
+# ==============================================================================
+elif menu == "💊 Control de Medicamentos & Dosis":
+    st.title("💊 Control de Medicamentos & Dosis")
+    
+    tab_dosis, tab_cat, tab_rep = st.tabs(["💊 Asignación de Dosis", "📚 Catálogo Central", "📊 Reporte Global por Medicamento"])
+    
+    # --- TAB DOSIS ---
+    with tab_dosis:
+        pacs_m = [p for p in listar_todos_pacientes() if p[5] == 'A' and p[6] == 'Paciente']
+        if not pacs_m:
+            st.warning("No hay pacientes activos registrados.")
         else:
-            st.subheader(f"Total de registros: {len(pacientes)}")
-            for pac in pacientes:
-                pid, pnom, fing, fnac, sexo, est, tuser, etapa, fetapa, hmay, fsuelta = pac
-                with st.expander(f"👤 {pnom} ({pid}) - Etapa: {etapa} - Status: {'ACTIVO' if est == 'A' else 'BLOQUEADO'}"):
-                    c1, c2 = st.columns(2)
+            opcs_m = [f"{p[0]} - {p[1]}" for p in pacs_m]
+            sel_m = st.selectbox("🔑 Selecciona el Paciente", opcs_m, key="sel_med_p")
+            pid_m = sel_m.split(" - ")[0]
+            
+            meds_curr, obs_curr = obtener_medicamentos_paciente(pid_m)
+            cat_list = listar_catalogo_medicamentos()
+            nombres_cat = [f"{r[1]} ({r[2]} - {r[3]})" for r in cat_list]
+            
+            st.subheader(f"Esquema de Medicación para {sel_m}")
+            
+            with st.form("form_meds_paciente"):
+                m_count = st.number_input("Número de Medicamentos asignados", min_value=1, max_value=10, value=max(1, len(meds_curr)))
+                meds_new = []
+                
+                for i in range(int(m_count)):
+                    st.markdown(f"**Medicamento #{i+1}**")
+                    c1, c2, c3, c4, c5 = st.columns([3, 1, 1, 1, 2])
+                    
+                    m_prev = meds_curr[i] if i < len(meds_curr) else {}
+                    
                     with c1:
-                        st.write(f"**Tipo**: {tuser}")
-                        st.write(f"**Fecha Ingreso**: {fing}")
-                        st.write(f"**Fecha Nacimiento**: {fnac}")
-                        st.write(f"**Sexo**: {sexo}")
+                        if nombres_cat:
+                            nom_m = st.selectbox(f"Medicamento #{i+1}", nombres_cat, key=f"cat_m_{i}")
+                        else:
+                            nom_m = st.text_input(f"Nombre Medicamento #{i+1}", value=m_prev.get("nombre", ""), key=f"txt_m_{i}")
                     with c2:
-                        st.write(f"**Etapa Actual**: {etapa}")
-                        st.write(f"**Inicio de Etapa**: {fetapa}")
-                        if hmay:
-                            st.write(f"**Hermano Mayor ID**: {hmay}")
-                            st.write(f"**Suelta Hermano**: {fsuelta if fsuelta else 'Pendiente'}")
+                        d_m = st.number_input("Mañana", min_value=0, value=int(m_prev.get("manana", 0)), key=f"m_{i}")
+                    with c3:
+                        d_t = st.number_input("Tarde", min_value=0, value=int(m_prev.get("tarde", 0)), key=f"t_{i}")
+                    with c4:
+                        d_n = st.number_input("Noche", min_value=0, value=int(m_prev.get("noche", 0)), key=f"n_{i}")
+                    with c5:
+                        ex_m = st.number_input("Existencia Stock", min_value=0, value=int(m_prev.get("existencia", 0)), key=f"ex_{i}")
+                    
+                    meds_new.append({
+                        "nombre": nom_m, "manana": d_m, "tarde": d_t, "noche": d_n, "existencia": ex_m
+                    })
+                
+                obs_med = st.text_area("Observaciones Médicas", value=obs_curr)
+                btn_m_save = st.form_submit_button("💾 Guardar Esquema de Medicamentos", use_container_width=True, disabled=not puede_escribir())
+                
+                if btn_m_save:
+                    guardar_medicamentos_paciente(pid_m, meds_new, obs_med, st.session_state["username"])
+                    st.success("🎉 ¡Esquema de medicamentos guardado correctamente!")
+                    st.toast("Esquema de medicamentos guardado.", icon="🎉")
 
-    # --- SECCIÓN 3: REGISTRO Y EDICIÓN DE USUARIOS ---
-    elif menu == "👤 Registro y Edición de Usuarios":
-        st.title("👤 Registro y Edición de Usuarios / Pacientes")
+    # --- TAB CATÁLOGO CENTRAL ---
+    with tab_cat:
+        st.subheader("📚 Catálogo Central de Medicamentos")
+        c_list = listar_catalogo_medicamentos()
+        st.dataframe([{"ID": r[0], "Nombre": r[1], "Presentación": r[2], "Concentración": r[3], "Observaciones": r[4]} for r in c_list], use_container_width=True)
         
-        modo_u = st.radio("Acción a realizar", ["🆕 Registrar Nuevo Usuario", "✏️ Modificar / Editar Usuario Existente"])
-        
-        pacientes_todos = listar_pacientes_todos(solo_activos=False)
-        
-        if modo_u == "✏️ Modificar / Editar Usuario Existente":
-            if not pacientes_todos:
-                st.warning("No hay usuarios registrados para editar.")
-                st.stop()
-            opciones_edit = [f"{p[0]} - {p[1]}" for p in pacientes_todos]
-            sel_u = st.selectbox("🔑 Selecciona el Usuario a Editar", opciones_edit)
-            pid_edit = sel_u.split(" - ")[0]
-            p_data = obtener_paciente_por_id(pid_edit)
+        with st.expander("➕ Agregar Nuevo Medicamento al Catálogo"):
+            with st.form("form_add_cat"):
+                c_nom = st.text_input("Nombre del Medicamento")
+                c_pres = st.text_input("Presentación (ej. Comprimidos, Gotas, Cápsulas)")
+                c_conc = st.text_input("Concentración (ej. 500 mg, 20 mg)")
+                c_obs = st.text_input("Observaciones / Categoría")
+                if st.form_submit_button("Guardar en Catálogo") and puede_escribir():
+                    if c_nom.strip():
+                        res = agregar_catalogo_medicamento(c_nom, c_pres, c_conc, c_obs)
+                        if res:
+                            st.success("✅ Guardado en catálogo.")
+                            st.rerun()
+                        else:
+                            st.error("❌ El medicamento ya existe en el catálogo.")
+
+    # --- TAB REPORTE GLOBAL ---
+    with tab_rep:
+        st.subheader("📊 Reporte de Consumo Global por Medicamento")
+        cat_all = listar_catalogo_medicamentos()
+        if cat_all:
+            sel_med_rep = st.selectbox("Selecciona Medicamento a Consultar", [f"{r[1]} ({r[2]} - {r[3]})" for r in cat_all])
             
-            p_id_val, p_nom_val, p_fing_val, p_fnac_val, p_sexo_val, p_est_val, p_tipo_val, p_etapa_val, p_fetapa_val, p_hmay_val, p_fsuelta_val = p_data
+            # Buscar consumo across all patients
+            pacs_active = [p for p in listar_todos_pacientes() if p[5] == 'A']
+            pac_con_med = []
+            consumo_total_diario = 0
+            stock_total_almacen = 0
+            
+            for pa in pacs_active:
+                m_list, _ = obtener_medicamentos_paciente(pa[0])
+                for m_item in m_list:
+                    if sel_med_rep in m_item.get("nombre", "") or m_item.get("nombre", "") in sel_med_rep:
+                        tot_diario = m_item.get("manana", 0) + m_item.get("tarde", 0) + m_item.get("noche", 0)
+                        ex = m_item.get("existencia", 0)
+                        consumo_total_diario += tot_diario
+                        stock_total_almacen += ex
+                        pac_con_med.append({
+                            "Folio": pa[0], "Paciente": pa[1], "Etapa": pa[7],
+                            "Dosis Mañana": m_item.get("manana", 0),
+                            "Dosis Tarde": m_item.get("tarde", 0),
+                            "Dosis Noche": m_item.get("noche", 0),
+                            "Consumo Diario": tot_diario,
+                            "Stock Actual": ex
+                        })
+            
+            col_r1, col_r2 = st.columns(2)
+            col_r1.metric("💊 Consumo Diario Total en Clínica", f"{consumo_total_diario} unidades/día")
+            col_r2.metric("📦 Stock Total en Almacén", f"{stock_total_almacen} unidades")
+            
+            if pac_con_med:
+                st.dataframe(pac_con_med, use_container_width=True)
+            else:
+                st.info("Ningún residente tiene asignado este medicamento actualmente.")
+
+# ==============================================================================
+# MÓDULO 6: 🚚 ENTREGA DE MEDICAMENTOS
+# ==============================================================================
+elif menu == "🚚 Entrega de Medicamentos":
+    st.title("🚚 Entrega Diaria de Medicamentos")
+    pacs_ent_m = [p for p in listar_todos_pacientes() if p[5] == 'A' and p[6] == 'Paciente']
+    
+    if not pacs_ent_m:
+        st.warning("No hay pacientes activos registrados.")
+    else:
+        opcs_em = [f"{p[0]} - {p[1]}" for p in pacs_ent_m]
+        sel_em = st.selectbox("🔑 Selecciona el Paciente para Entrega", opcs_em)
+        pid_em = sel_em.split(" - ")[0]
+        
+        meds_ent, obs_ent = obtener_medicamentos_paciente(pid_em)
+        
+        if not meds_ent:
+            st.info("Este paciente no tiene esquema de medicamentos asignado.")
         else:
-            p_id_val = generar_siguiente_folio()
-            p_nom_val, p_fing_val, p_fnac_val, p_sexo_val, p_est_val, p_tipo_val = "", str(date.today()), "2000-01-01", "MASCULINO", "A", "Paciente"
-
-        form_key = f"form_u_{p_id_val}_{modo_u}"
-        with st.form(form_key):
-            st.subheader(f"Datos del Usuario ({p_id_val})")
-            c1, c2 = st.columns(2)
-            with c1:
-                u_folio = st.text_input("Folio ID", value=p_id_val, disabled=True)
-                u_nombre = st.text_input("Nombre Completo *", value=p_nom_val)
-                u_tipo = st.selectbox("Tipo de Usuario", ["Paciente", "Servidor / Staff"], index=0 if p_tipo_val == "Paciente" else 1)
-                u_sexo = st.selectbox("Sexo", ["MASCULINO", "FEMENINO"], index=0 if p_sexo_val == "MASCULINO" else 1)
-            with c2:
-                u_fingreso = st.text_input("Fecha de Ingreso (YYYY-MM-DD)", value=p_fing_val if p_fing_val else str(date.today()))
-                u_fnac = st.text_input("Fecha de Nacimiento (YYYY-MM-DD)", value=p_fnac_val if p_fnac_val else "2000-01-01")
-                u_estatus = st.selectbox("Estatus", ["A - Activo", "B - Bloqueado / Inactivo"], index=0 if p_est_val == "A" else 1)
-
-            btn_save_u = st.form_submit_button("💾 Guardar Usuario / Cambios", use_container_width=True, disabled=es_solo_lectura())
-            
-            if btn_save_u:
-                if not u_nombre.strip():
-                    st.error("⚠️ El Nombre Completo es obligatorio.")
-                else:
-                    est_code = "A" if u_estatus.startswith("A") else "B"
-                    dup = verificar_duplicado_nombre(u_nombre, p_id_val if modo_u != "🆕 Registrar Nuevo Usuario" else None)
-                    if dup:
-                        st.error(f"❌ Ya existe un usuario registrado con el nombre '{dup[1]}' bajo el Folio {dup[0]}.")
-                    else:
-                        guardar_usuario_paciente(p_id_val, u_nombre.strip(), u_fingreso, u_fnac, u_sexo, est_code, u_tipo, st.session_state["username"])
-                        st.success(f"✅ Usuario **{u_nombre}** guardado exitosamente.")
-                        st.toast(f"🎉 ¡Usuario {u_nombre} guardado con éxito!")
-
-    # --- SECCIÓN 4: GESTIÓN DE ETAPAS & PROCESO ---
-    elif menu == "🎯 Gestión de Etapas & Proceso":
-        st.title("🎯 Gestión de Etapas de Tratamiento (Sawabona Shikoba)")
-        
-        pacientes_activos = listar_pacientes_todos(solo_activos=True)
-        pacientes_solo = [p for p in pacientes_activos if p[6] == "Paciente"]
-        
-        if not pacientes_solo:
-            st.info("No hay pacientes activos registrados en proceso de etapas.")
-        else:
-            opciones_et = [f"{p[0]} - {p[1]} (Etapa: {p[7]})" for p in pacientes_solo]
-            sel_e = st.selectbox("🔑 Selecciona un Paciente para Revisar Avance", opciones_et)
-            p_id_e = sel_e.split(" - ")[0]
-            p_data = obtener_paciente_por_id(p_id_e)
-            
-            p_id, p_nom, f_ing, f_nac, sexo, est, tuser, etapa, f_etapa, h_may, f_suelta = p_data
-            
-            st.markdown("---")
-            st.subheader(f"📊 Estado del Proceso: {p_nom} ({p_id})")
-            
-            # Cálculo de Días
-            try:
-                d_ingreso = datetime.strptime(f_ing, "%Y-%m-%d").date()
-                dias_totales = (date.today() - d_ingreso).days
-            except Exception:
-                dias_totales = 0
+            with st.form("form_entrega_diaria"):
+                st.markdown(f"##### Registrando Entrega de Medicamentos para `{sel_em}`")
+                f_entrega = st.date_input("Fecha de Entrega", value=date.today())
                 
-            try:
-                d_etapa = datetime.strptime(f_etapa.split(" ")[0], "%Y-%m-%d").date()
-                dias_en_etapa = (date.today() - d_etapa).days
-            except Exception:
-                dias_en_etapa = 0
-
-            dias_req_etapa = ETAPAS_CONFIG.get(etapa, {}).get("dias", 30)
-            siguiente_etapa = ETAPAS_CONFIG.get(etapa, {}).get("siguiente", "GRADUADO")
-            
-            col_a, col_b, col_c = st.columns(3)
-            with col_a:
-                st.metric("Etapa Actual", etapa)
-            with col_b:
-                st.metric("Días en Etapa Actual", f"{dias_en_etapa} / {dias_req_etapa} días")
-            with col_c:
-                st.metric("Días Totales en Clínica", f"{dias_totales} días")
+                entregas_confirmadas = []
+                for idx, mi in enumerate(meds_ent):
+                    st.write(f"💊 **{mi['nombre']}** | Stock Actual: `{mi['existencia']}`")
+                    tot_dosis = mi['manana'] + mi['tarde'] + mi['noche']
+                    cant_ent = st.number_input(f"Cantidad a entregar de {mi['nombre']}", min_value=0, max_value=mi['existencia'], value=tot_dosis, key=f"ent_{idx}")
+                    entregas_confirmadas.append({"index": idx, "nombre": mi['nombre'], "cantidad": cant_ent})
                 
-            pct = min(1.0, max(0.0, dias_en_etapa / dias_req_etapa if dias_req_etapa > 0 else 1.0))
-            st.progress(pct, text=f"Avance de Tiempo en {etapa}: {pct*100:.1f}%")
-            
-            # Alertas de Días o Rezago
-            if dias_en_etapa >= (dias_req_etapa - 5) and dias_en_etapa <= dias_req_etapa:
-                st.warning(f"⚠️ **ALERTA PREVENTIVA**: {p_nom} está a {dias_req_etapa - dias_en_etapa} días de cumplir el tiempo de su etapa {etapa}. Solicitar revisión de comité.")
-            elif dias_en_etapa > dias_req_etapa:
-                st.error(f"🚨 **ALERTA DE REZAGO / ESTANCAMIENTO**: {p_nom} ha superado los {dias_req_etapa} días en la etapa {etapa} por +{dias_en_etapa - dias_req_etapa} días.")
-
-            st.markdown("---")
-            tab_req, tab_hermano = st.tabs(["📋 Checklist de Requisitos de Etapa", "🤝 Hermano Menor & Mayor"])
-            
-            with tab_req:
-                st.subheader(f"Checklist para Cambio a {siguiente_etapa}")
-                reqs = obtener_requisitos_etapa(etapa)
-                grupos_counts = contar_grupos_etapa_paciente(p_id, etapa)
+                btn_do_entrega = st.form_submit_button("🚚 Confirmar y Descontar de Inventario", use_container_width=True, disabled=not puede_escribir())
                 
-                reqs_completados = 0
-                total_reqs = len(reqs)
-                
-                for req_id, req_txt, es_grupo in reqs:
-                    if es_grupo == 1:
-                        req_cumplido = False
-                        if "Aquí y Ahora" in req_txt and grupos_counts["Aquí y Ahora"] >= 4:
-                            req_cumplido = True
-                        elif "Terapia de Grupo" in req_txt and grupos_counts["Terapia de Grupo"] >= 4:
-                            req_cumplido = True
-                        elif "Feedback" in req_txt and grupos_counts["Feedback"] >= 4:
-                            req_cumplido = True
-                        elif "2 Grupos" in req_txt:
-                            if "Aquí y Ahora" in req_txt and grupos_counts["Aquí y Ahora"] >= 2: req_cumplido = True
-                            if "Terapia de Grupo" in req_txt and grupos_counts["Terapia de Grupo"] >= 2: req_cumplido = True
-                            if "Feedback" in req_txt and grupos_counts["Feedback"] >= 2: req_cumplido = True
-                            
-                        st.checkbox(f"🗣️ {req_txt} (Registrados en sistema: {grupos_counts.get('Terapia de Grupo' if 'Terapia' in req_txt else 'Aquí y Ahora' if 'Aquí' in req_txt else 'Feedback', 0)})", value=req_cumplido, disabled=True)
-                        if req_cumplido: reqs_completados += 1
-                    else:
-                        c_user = st.checkbox(f"📌 {req_txt}", key=f"req_{p_id}_{req_id}")
-                        if c_user: reqs_completados += 1
-
-                st.write("")
-                listo_promover = (reqs_completados == total_reqs and total_reqs > 0 and dias_en_etapa >= (dias_req_etapa - 5))
-                btn_promover = st.button(f"🚀 Promover a {siguiente_etapa}", disabled=not listo_promover or es_solo_lectura())
-                
-                if btn_promover:
-                    promover_paciente_etapa(p_id, etapa, siguiente_etapa, st.session_state["username"])
-                    st.success(f"🎉 ¡{p_nom} fue promovido exitosamente a {siguiente_etapa}!")
-                    st.toast(f"🎉 ¡{p_nom} promovido a {siguiente_etapa}!")
+                if btn_do_entrega:
+                    # Descontar stock
+                    for item in entregas_confirmadas:
+                        meds_ent[item['index']]['existencia'] -= item['cantidad']
+                    
+                    guardar_medicamentos_paciente(pid_em, meds_ent, obs_ent, st.session_state["username"])
+                    
+                    # Guardar registro entrega
+                    conn = sqlite3.connect(DB_FILE)
+                    c = conn.cursor()
+                    f_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    c.execute('INSERT INTO entregas_medicamentos (paciente_id, fecha_entrega, entregado_por, detalle_json) VALUES (?, ?, ?, ?)',
+                              (pid_em, f_now, st.session_state["username"], json.dumps(entregas_confirmadas, ensure_ascii=False)))
+                    conn.commit()
+                    conn.close()
+                    
+                    st.success("🎉 ¡Entrega realizada y descontada del inventario correctamente!")
+                    st.toast("Entrega confirmada.", icon="🚚")
                     st.rerun()
 
-            with tab_hermano:
-                st.subheader("Acompañamiento de Hermano Mayor (ACOGIDA)")
-                if etapa == "ACOGIDA":
-                    st.info("Los primeros 15 días en Acogida el usuario cuenta con un Hermano Mayor de acompañamiento.")
-                    posibles_mayores = [p for p in pacientes_activos if p[0] != p_id]
-                    opciones_m = ["-- Seleccionar Hermano Mayor --"] + [f"{p[0]} - {p[1]}" for p in posibles_mayores]
-                    
-                    hmay_sel = st.selectbox("Asignar Hermano Mayor", opciones_m)
-                    if st.button("💾 Guardar Hermano Mayor", disabled=es_solo_lectura()):
-                        if not hmay_sel.startswith("--"):
-                            hm_id = hmay_sel.split(" - ")[0]
-                            asignar_hermano_mayor(p_id, hm_id)
-                            st.success("Hermano mayor asignado correctamente.")
-                            st.toast("🎉 Hermano mayor asignado!")
-                            st.rerun()
-                            
-                    if h_may:
-                        st.write(f"**Hermano Mayor Actual**: {h_may}")
-                        st.write(f"**Fecha de Suelta**: {f_suelta if f_suelta else 'Pendiente'}")
-                        if st.button("🔓 Registrar Suelta de Hermano Mayor", disabled=es_solo_lectura()):
-                            registrar_suelta_hermano(p_id)
-                            st.success("Se registró la suelta del hermano mayor.")
-                            st.toast("🎉 Suelta de hermano mayor registrada!")
-                            st.rerun()
-                else:
-                    st.write("El acompañamiento de Hermano Mayor aplica principalmente para la Etapa 1 (ACOGIDA).")
-
-    # --- SECCIÓN 5: GRUPOS TERAPÉUTICOS ---
-    elif menu == "🗣️ Grupos Terapéuticos":
-        st.title("🗣️ Registro de Grupos Terapéuticos")
-        
-        tab_reg_g, tab_hist_g = st.tabs(["📝 Registrar Sesión de Grupo", "📜 Historial e Impresión PDF"])
-        
-        pacientes_activos = listar_pacientes_todos(solo_activos=True)
-        pacientes_solo = [p for p in pacientes_activos if p[6] == "Paciente"]
-        
-        with tab_reg_g:
-            if not pacientes_solo:
-                st.warning("No hay pacientes activos para registrar grupos.")
-            else:
-                opciones_g = [f"{p[0]} - {p[1]} (Etapa: {p[7]})" for p in pacientes_solo]
-                sel_p_g = st.selectbox("Seleccionar Paciente *", opciones_g)
-                pid_g = sel_p_g.split(" - ")[0]
-                p_data_g = obtener_paciente_por_id(pid_g)
-                
-                t_grupo = st.selectbox("Tipo de Grupo *", ["Terapia de Grupo", "Aquí y Ahora", "Feedback"])
-                f_grupo = st.text_input("Fecha del Grupo (YYYY-MM-DD)", value=str(date.today()))
-                facilitador_g = st.text_input("Facilitador / Staff a cargo", value=st.session_state["nombre_completo"])
-                
-                with st.form("form_grupo_terapeuto"):
-                    st.subheader(f"Captura de {t_grupo} - {p_data_g[1]}")
-                    
-                    datos_g = {}
-                    if t_grupo in ["Terapia de Grupo", "Aquí y Ahora"]:
-                        datos_g["Compartimiento"] = st.text_area("Compartimiento (Texto largo)")
-                        datos_g["Observaciones"] = st.text_area("Observaciones")
-                        datos_g["Devoluciones"] = st.text_area("Devoluciones")
-                        datos_g["Como_se_queda_y_compromiso"] = st.text_area("¿Cómo se queda y a qué se compromete?")
-                    else:
-                        datos_g["Logros"] = st.text_area("Logros")
-                        datos_g["Dificultades"] = st.text_area("Dificultades")
-                        datos_g["Observaciones"] = st.text_area("Observaciones")
-                        datos_g["Devoluciones"] = st.text_area("Devoluciones")
-                        datos_g["Como_se_queda_y_compromiso"] = st.text_area("¿Cómo se queda y a qué se compromete?")
-
-                    btn_g = st.form_submit_button("💾 Guardar Sesión de Grupo", use_container_width=True, disabled=es_solo_lectura())
-                    
-                    if btn_g:
-                        guardar_grupo_terapeuto(pid_g, t_grupo, p_data_g[7], f_grupo, facilitador_g, datos_g, st.session_state["username"])
-                        st.success(f"✅ Sesión de {t_grupo} registrada exitosamente para **{p_data_g[1]}**.")
-                        st.toast("🎉 ¡Grupo terapéutico registrado!")
-
-        with tab_hist_g:
-            if pacientes_solo:
-                opciones_hist = [f"{p[0]} - {p[1]}" for p in pacientes_solo]
-                sel_hist = st.selectbox("Seleccionar Paciente para Consulta", opciones_hist)
-                pid_hist = sel_hist.split(" - ")[0]
-                p_data_h = obtener_paciente_por_id(pid_hist)
-                
-                grupos_p = obtener_grupos_paciente(pid_hist)
-                st.subheader(f"Historial de Grupos ({len(grupos_p)} sesiones)")
-                
-                pdf_bytes = generar_pdf_grupos_paciente(p_data_h, grupos_p)
-                st.download_button("🖨️ Descargar Expediente de Grupos en PDF", data=pdf_bytes, file_name=f"Grupos_{pid_hist}.pdf", mime="application/pdf")
-                
-                for g in grupos_p:
-                    with st.expander(f"🗣️ {g['tipo_grupo']} - {g['fecha_grupo']} (Etapa: {g['etapa']})"):
-                        st.write(f"**Facilitador**: {g['facilitador']}")
-                        for k, v in g["datos"].items():
-                            st.write(f"**{k}**: {v}")
-
-    # --- SECCIÓN 6: CONTROL DE MEDICAMENTOS Y DOSIS ---
-    elif menu == "💊 Control de Medicamentos y Dosis":
-        st.title("💊 Control de Medicamentos y Esquema de Dosis")
-        
-        tab_p_med, tab_cat_med, tab_rep_med = st.tabs(["💊 Esquema por Paciente", "📚 Catálogo de Medicamentos", "📊 Consumo Global"])
-        
-        pacientes_activos = listar_pacientes_todos(solo_activos=True)
-        
-        with tab_p_med:
-            if not pacientes_activos:
-                st.info("No hay pacientes activos para asignar esquema de medicamentos.")
-            else:
-                opciones_m = [f"{p[0]} - {p[1]}" for p in pacientes_activos]
-                sel_m = st.selectbox("Seleccionar Residentes *", opciones_m)
-                pid_m = sel_m.split(" - ")[0]
-                p_data_m = obtener_paciente_por_id(pid_m)
-                
-                meds_cargados, obs_med, _, _ = obtener_medicamentos_paciente(pid_m)
-                
-                catalogo = obtener_catalogo_medicamentos()
-                nombres_cat = [f"{m[1]} ({m[2]} - {m[3]})" for m in catalogo] if catalogo else ["Sin catálogo"]
-                
-                st.subheader(f"Esquema de Dosis Diario - {p_data_m[1]}")
-                
-                with st.form("form_meds_paciente"):
-                    meds_input = []
-                    for i in range(5):
-                        st.markdown(f"**Medicamento #{i+1}**")
-                        c1, c2, c3, c4, c5 = st.columns([2.5, 1, 1, 1, 1.5])
-                        m_prev = meds_cargados[i] if i < len(meds_cargados) else {}
-                        
-                        with c1:
-                            m_nom = st.selectbox(f"Medicamento {i+1}", ["-- Ninguno --"] + nombres_cat, key=f"cat_m_{i}")
-                        with c2:
-                            d_man = st.number_input("Mañana", min_value=0.0, step=0.5, value=float(m_prev.get("manana", 0)), key=f"dm_{i}")
-                        with c3:
-                            d_tar = st.number_input("Tarde", min_value=0.0, step=0.5, value=float(m_prev.get("tarde", 0)), key=f"dt_{i}")
-                        with c4:
-                            d_noc = st.number_input("Noche", min_value=0.0, step=0.5, value=float(m_prev.get("noche", 0)), key=f"dn_{i}")
-                        with c5:
-                            e_fis = st.number_input("Existencia", min_value=0.0, step=1.0, value=float(m_prev.get("existencia", 0)), key=f"ex_{i}")
-                            
-                        if not m_nom.startswith("--"):
-                            meds_input.append({
-                                "nombre": m_nom, "manana": d_man, "tarde": d_tar, "noche": d_noc, "existencia": e_fis
-                            })
-
-                    obs_txt = st.text_area("Observaciones Medicamentosas / Alergias", value=obs_med)
-                    btn_m = st.form_submit_button("💾 Guardar Esquema de Medicamentos", use_container_width=True, disabled=es_solo_lectura())
-                    
-                    if btn_m:
-                        guardar_medicamentos_paciente(pid_m, meds_input, obs_txt, st.session_state["username"])
-                        st.success("✅ Esquema de medicamentos guardado correctamente.")
-                        st.toast("🎉 ¡Esquema de medicamentos guardado!")
-
-        with tab_cat_med:
-            st.subheader("📚 Catálogo Central de Medicamentos")
-            if puede_escribir():
-                with st.form("form_add_cat"):
-                    st.write("Agregar o Actualizar Medicamento en Catálogo")
-                    c1, c2, c3 = st.columns(3)
-                    with c1: c_nom = st.text_input("Nombre Comercial / Genérico *")
-                    with c2: c_conc = st.text_input("Concentración (ej. 500 mg)")
-                    with c3: c_pres = st.selectbox("Presentación", ["Comprimidos", "Cápsulas", "Gotas", "Jarabe", "Inyectable", "Otro"])
-                    c_desc = st.text_input("Descripción / Indicaciones")
-                    
-                    if st.form_submit_button("💾 Agregar al Catálogo"):
-                        if c_nom.strip():
-                            guardar_medicamento_catalogo(c_nom, c_conc, c_pres, c_desc)
-                            st.success("Medicamento agregado al catálogo.")
-                            st.rerun()
-
-            cats = obtener_catalogo_medicamentos()
-            for cm in cats:
-                st.write(f"💊 **{cm[1]}** | Concentración: {cm[2]} | Presentación: {cm[3]} | *{cm[4]}*")
-
-        with tab_rep_med:
-            st.subheader("📊 Consumo Global de Medicamentos en la Clínica")
-            cats = obtener_catalogo_medicamentos()
-            if cats:
-                sel_m_rep = st.selectbox("Seleccionar Medicamento del Catálogo para Reporte", [m[1] for m in cats])
-                
-                total_diario = 0.0
-                pacientes_consumidores = []
-                
-                for p in pacientes_activos:
-                    p_id, p_nom = p[0], p[1]
-                    m_list, _, _, _ = obtener_medicamentos_paciente(p_id)
-                    for m in m_list:
-                        if sel_m_rep in m.get("nombre", ""):
-                            d_diaria = m.get("manana", 0) + m.get("tarde", 0) + m.get("noche", 0)
-                            total_diario += d_diaria
-                            pacientes_consumidores.append((p_id, p_nom, d_diaria, m.get("existencia", 0)))
-                            
-                st.metric("Consumo Diario Acumulado en la Clínica", f"{total_diario} unidades/día")
-                st.write("**Pacientes que lo consumen:**")
-                for pid, pnom, dd, ex in pacientes_consumidores:
-                    st.write(f"• **{pnom}** ({pid}) - Dosis diaria: {dd} unidades | Stock individual: {ex}")
-
-    # --- SECCIÓN 7: ENTREGA DE MEDICAMENTOS ---
-    elif menu == "🚚 Entrega de Medicamentos":
-        st.title("🚚 Registro de Entrega de Medicamentos (Almacén)")
-        
-        pacientes_activos = listar_pacientes_todos(solo_activos=True)
-        if not pacientes_activos:
-            st.info("No hay pacientes activos.")
+# ==============================================================================
+# MÓDULO 7: 📦 RESPALDO Y RESTAURACIÓN DE BASE DE DATOS
+# ==============================================================================
+elif menu == "📦 Respaldo y Restauración":
+    st.title("📦 Respaldo y Restauración de Base de Datos")
+    st.markdown("Guarda una copia segura de tu información para evitar pérdidas ante reinicios del servidor.")
+    
+    tab_down, tab_up = st.tabs(["📥 Descargar Respaldo (.db)", "📤 Restaurar Base de Datos"])
+    
+    with tab_down:
+        st.subheader("📥 Descargar Copia de Seguridad")
+        if os.path.exists(DB_FILE):
+            with open(DB_FILE, "rb") as f:
+                bytes_db = f.read()
+            
+            fname = f"Sawabona_Respaldo_DB_{datetime.now().strftime('%Y%m%m_%H%M%S')}.db"
+            st.download_button(
+                label="📥 Descargar Archivo de Respaldo (.db)",
+                data=bytes_db,
+                file_name=fname,
+                mime="application/x-sqlite3",
+                use_container_width=True
+            )
+            st.info("💡 **Recomendación**: Descarga una copia al finalizar tu jornada para respaldar tus registros.")
         else:
-            opciones_e = [f"{p[0]} - {p[1]}" for p in pacientes_activos]
-            sel_e = st.selectbox("Seleccionar Paciente para Entrega", opciones_e)
-            pid_e = sel_e.split(" - ")[0]
-            p_data_e = obtener_paciente_por_id(pid_e)
-            
-            meds_e, _, _, _ = obtener_medicamentos_paciente(pid_e)
-            
-            if not meds_e:
-                st.warning("Este residente no tiene medicamentos registrados en su esquema.")
-            else:
-                with st.form("form_entrega_meds"):
-                    st.subheader(f"Registro de Entrega - {p_data_e[1]}")
-                    
-                    entregas_confirmadas = []
-                    for i, m in enumerate(meds_e):
-                        d_diaria = m.get("manana", 0) + m.get("tarde", 0) + m.get("noche", 0)
-                        c1, c2, c3 = st.columns([3, 1.5, 1.5])
-                        with c1:
-                            st.write(f"💊 **{m['nombre']}** (Stock actual: {m['existencia']})")
-                        with c2:
-                            cant_e = st.number_input(f"Cantidad a entregar", min_value=0.0, value=float(d_diaria), key=f"cant_e_{i}")
-                        with c3:
-                            st.write(f"Dosis habitual: {d_diaria}")
-                            
-                        if cant_e > 0:
-                            entregas_confirmadas.append({"nombre": m['nombre'], "cantidad": cant_e, "existencia_anterior": m['existencia']})
+            st.error("No se encontró la base de datos.")
 
-                    btn_e = st.form_submit_button("📦 Confirmar Entrega y Descontar Stock", use_container_width=True, disabled=es_solo_lectura())
-                    
-                    if btn_e:
-                        # Descontar stock
-                        for m_item in meds_e:
-                            for ec in entregas_confirmadas:
-                                if m_item["nombre"] == ec["nombre"]:
-                                    m_item["existencia"] = max(0.0, m_item["existencia"] - ec["cantidad"])
-                                    
-                        guardar_medicamentos_paciente(pid_e, meds_e, "", st.session_state["username"])
-                        registrar_entrega_medicamentos(pid_e, st.session_state["username"], entregas_confirmadas)
-                        
-                        st.success("✅ Entrega registrada exitosamente y stock actualizado.")
-                        st.toast("🎉 ¡Entrega registrada correctamente!")
+    with tab_up:
+        st.subheader("📤 Cargar y Restaurar Respaldo")
+        st.warning("⚠️ **ATENCIÓN**: Restaurar un respaldo reemplazará la base de datos actual con la información del archivo cargado.")
+        
+        uploaded_db = st.file_uploader("Selecciona el archivo de respaldo (.db)", type=["db", "sqlite"])
+        if uploaded_db and puede_escribir():
+            if st.button("⚠️ Confirmar Restauración de Base de Datos", use_container_width=True):
+                with open(DB_FILE, "wb") as f:
+                    f.write(uploaded_db.getbuffer())
+                st.success("🎉 ¡Base de datos restaurada exitosamente!")
+                st.toast("Base de datos restaurada.", icon="🎉")
+                st.rerun()
 
-    # --- SECCIÓN 8: REPOSITORIO DE DOCUMENTOS (EXCLUSIVO ADMIN) ---
-    elif menu == "📁 Repositorio de Documentos":
-        if not es_admin():
-            st.error("⛔ Acceso denegado: Este módulo es exclusivo para el Administrador del Sistema.")
-            st.stop()
-            
-        st.title("📁 Repositorio de Documentos y Formatos")
+# ==============================================================================
+# MÓDULO 8: 📁 REPOSITORIO DE DOCUMENTOS (SOLO ADMIN)
+# ==============================================================================
+elif menu == "📁 Repositorio de Documentos":
+    st.title("📁 Repositorio de Documentos y Formatos")
+    st.markdown("Almacén de manuales, formatos de admisión, reglamentos y plantillas clínicas.")
+    
+    carpetas_def = [
+        "📋 Formatos Clínicos y Administrativos",
+        "📖 Manuales de Operación",
+        "⚖️ Reglamentos y Normativas",
+        "📑 Plantillas de Evaluación",
+        "📁 Documentos Generales"
+    ]
+    
+    tab_rep_ver, tab_rep_up = st.tabs(["📂 Explorar y Descargar Archivos", "📤 Subir Nuevo Archivo"])
+    
+    with tab_rep_ver:
+        c_filtro = st.selectbox("Filtrar por Carpeta", ["Todas las Carpetas"] + carpetas_def)
+        docs = obtener_documentos_repositorio(c_filtro)
         
-        carpetas_def = [
-            "Todas las Carpetas",
-            "📋 Formatos Clínicos y Administrativos",
-            "📖 Manuales de Operación",
-            "⚖️ Reglamentos y Normativas",
-            "📑 Plantillas de Evaluación",
-            "📁 Documentos Generales"
-        ]
-        
-        tab_ver_doc, tab_sub_doc = st.tabs(["📥 Consultar y Descargar Documentos", "📤 Subir Nuevo Documento"])
-        
-        with tab_sub_doc:
-            st.subheader("Subir Archivo al Repositorio")
-            with st.form("form_subir_doc"):
-                carp_sel = st.selectbox("Carpeta / Categoría *", carpetas_def[1:])
-                file_up = st.file_uploader("Seleccionar Archivo (PDF, Word, Excel, Imagen) *", type=["pdf", "docx", "xlsx", "png", "jpg", "txt"])
-                desc_up = st.text_input("Descripción o Notas del Archivo")
-                
-                if st.form_submit_button("📤 Subir Documento a la Nube"):
-                    if file_up is not None:
-                        b_data = file_up.read()
-                        guardar_documento_repositorio(carp_sel, file_up.name, file_up.type, b_data, desc_up, st.session_state["username"])
-                        st.success(f"✅ Documento '{file_up.name}' subido correctamente a '{carp_sel}'.")
-                        st.toast("🎉 Documento subido con éxito!")
-                        st.rerun()
-
-        with tab_ver_doc:
-            c_filtro = st.selectbox("Filtrar por Carpeta", carpetas_def)
-            docs = obtener_documentos_repositorio(c_filtro if c_filtro != "Todas las Carpetas" else None)
-            
-            st.subheader(f"Documentos Disponibles ({len(docs)})")
-            for d_id, d_carp, d_nom, d_mime, d_blob, d_desc, d_fecha, d_user in docs:
-                with st.expander(f"📄 {d_nom} [{d_carp}] - Subido: {d_fecha}"):
-                    st.write(f"**Descripción**: {d_desc if d_desc else 'Sin descripción'}")
-                    st.write(f"**Subido por**: {d_user}")
+        if not docs:
+            st.info("No hay documentos subidos en esta carpeta.")
+        else:
+            for doc in docs:
+                # doc: (id, carpeta, nombre_archivo, mime_type, bytes_blob, descripcion, fecha_subida, usuario_subida)
+                with st.expander(f"📄 **{doc[2]}** | Carpeta: `{doc[1]}` | Subido: {doc[6]}"):
+                    st.write(f"**Descripción / Notas**: {doc[5]}")
+                    st.write(f"**Subido por**: {doc[7]}")
                     
-                    c1, c2 = st.columns([2, 1])
-                    with c1:
-                        st.download_button("📥 Descargar Archivo", data=d_blob, file_name=d_nom, mime=d_mime, key=f"dl_{d_id}")
-                    with c2:
-                        if st.button("🗑️ Eliminar Documento", key=f"del_doc_{d_id}"):
-                            eliminar_documento_repositorio(d_id)
-                            st.success("Documento eliminado.")
+                    c_d1, c_d2 = st.columns(2)
+                    with c_d1:
+                        st.download_button(
+                            label=f"📥 Descargar {doc[2]}",
+                            data=doc[4],
+                            file_name=doc[2],
+                            mime=doc[3],
+                            key=f"down_doc_{doc[0]}"
+                        )
+                    with c_d2:
+                        if es_admin():
+                            if st.button("🗑️ Eliminar Archivo", key=f"del_doc_{doc[0]}"):
+                                eliminar_documento_repositorio(doc[0])
+                                st.success("Archivo eliminado.")
+                                st.rerun()
+
+    with tab_rep_up:
+        with st.form("form_subir_doc"):
+            st.subheader("Subir Documento a la Nube")
+            up_carpeta = st.selectbox("Carpeta Destino", carpetas_def)
+            up_file = st.file_uploader("Selecciona el Archivo (PDF, Word, Excel, Imagen)", type=["pdf", "docx", "xlsx", "png", "jpg", "txt"])
+            up_desc = st.text_input("Descripción o Notas del Archivo")
+            
+            if st.form_submit_button("📤 Subir Documento al Repositorio") and es_admin():
+                if up_file:
+                    bytes_f = up_file.getbuffer().tobytes()
+                    guardar_documento_repositorio(
+                        up_carpeta, up_file.name, up_file.type, bytes_f, up_desc, st.session_state["username"]
+                    )
+                    st.success(f"🎉 ¡Archivo **{up_file.name}** subido al repositorio!")
+                    st.toast("Documento guardado.", icon="🎉")
+                    st.rerun()
+                else:
+                    st.error("⚠️ Debes seleccionar un archivo para subir.")
+
+# ==============================================================================
+# MÓDULO 9: ⚙️ CONFIGURACIÓN & SEGURIDAD (SOLO ADMIN)
+# ==============================================================================
+elif menu == "⚙️ Configuración & Seguridad":
+    st.title("⚙️ Configuración & Seguridad del Sistema")
+    
+    tab_roles, tab_pass, tab_reqs = st.tabs(["👥 Gestión de Usuarios y Roles", "🔑 Cambiar Mi Contraseña", "⚙️ Requisitos por Etapa"])
+    
+    with tab_roles:
+        st.subheader("👥 Gestión de Cuentas de Acceso al Sistema")
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute('SELECT id, username, nombre_completo, rol FROM usuarios')
+        users_list = c.fetchall()
+        conn.close()
+        
+        st.dataframe([{"ID": u[0], "Usuario": u[1], "Nombre": u[2], "Rol / Nivel": u[3]} for u in users_list], use_container_width=True)
+        
+        with st.expander("➕ Crear Nueva Cuenta para Personal / Staff"):
+            with st.form("form_create_user_account"):
+                nu_user = st.text_input("Nombre de Usuario (Login)")
+                nu_name = st.text_input("Nombre Completo del Personal")
+                nu_pass = st.text_input("Contraseña Inicial", type="password")
+                nu_rol = st.selectbox("Nivel de Acceso / Rol", [
+                    "Nivel 1 - Administrador",
+                    "Nivel 2 - Lectura y Escritura",
+                    "Nivel 3 - Solo Lectura"
+                ])
+                if st.form_submit_button("Crear Cuenta"):
+                    if nu_user.strip() and nu_pass.strip():
+                        conn = sqlite3.connect(DB_FILE)
+                        c = conn.cursor()
+                        try:
+                            c.execute('INSERT INTO usuarios (username, password_hash, nombre_completo, rol) VALUES (?, ?, ?, ?)',
+                                      (nu_user.strip(), hash_pass(nu_pass), nu_name.strip(), nu_rol))
+                            conn.commit()
+                            st.success(f"✅ Cuenta **{nu_user}** creada exitosamente.")
                             st.rerun()
-
-    # --- SECCIÓN 9: CONFIGURACIÓN & SEGURIDAD (EXCLUSIVO ADMIN) ---
-    elif menu == "⚙️ Configuración & Seguridad":
-        if not es_admin():
-            st.error("⛔ Acceso denegado: Este módulo es exclusivo para el Administrador del Sistema.")
-            st.stop()
-            
-        st.title("⚙️ Configuración de Seguridad y Roles de Usuario")
-        
-        tab_u_sys, tab_req_sys, tab_pass_sys = st.tabs(["👤 Usuarios del Sistema y Roles", "🎯 Administrar Requisitos de Etapas", "🔑 Mi Contraseña"])
-        
-        with tab_u_sys:
-            st.subheader("Usuarios con Acceso a la Aplicación")
-            
-            conn = sqlite3.connect(DB_FILE)
-            c = conn.cursor()
-            c.execute('SELECT username, nombre_completo, rol FROM usuarios')
-            users_db = c.fetchall()
-            conn.close()
-            
-            for u_un, u_nom, u_rol in users_db:
-                st.write(f"• **{u_nom}** (`{u_un}`) - Rol: **{u_rol}**")
-                
-            st.markdown("---")
-            st.subheader("Crear o Actualizar Usuario del Sistema")
-            with st.form("form_user_sys"):
-                c1, c2 = st.columns(2)
-                with c1:
-                    new_un = st.text_input("Nombre de Usuario (Login) *")
-                    new_pass = st.text_input("Contraseña *", type="password")
-                with c2:
-                    new_nom = st.text_input("Nombre Completo *")
-                    new_rol = st.selectbox("Rol y Nivel de Acceso", [
-                        "Nivel 1 - Administrador",
-                        "Nivel 2 - Lectura y Escritura",
-                        "Nivel 3 - Solo Lectura"
-                    ])
-                    
-                if st.form_submit_button("💾 Guardar Usuario del Sistema"):
-                    if new_un.strip() and new_pass.strip():
-                        conn = sqlite3.connect(DB_FILE)
-                        c = conn.cursor()
-                        p_hash = hash_pass(new_pass)
-                        c.execute('''
-                            INSERT OR REPLACE INTO usuarios (username, password_hash, nombre_completo, rol)
-                            VALUES (?, ?, ?, ?)
-                        ''', (new_un.strip(), p_hash, new_nom.strip(), new_rol))
-                        conn.commit()
+                        except sqlite3.IntegrityError:
+                            st.error("❌ El nombre de usuario ya existe.")
                         conn.close()
-                        st.success(f"Usuario '{new_un}' guardado correctamente.")
-                        st.toast("🎉 Usuario del sistema guardado!")
-                        st.rerun()
 
-        with tab_req_sys:
-            st.subheader("Configuración Dinámica de Requisitos por Etapa")
-            e_sel_cfg = st.selectbox("Seleccionar Etapa a Configurar", list(ETAPAS_CONFIG.keys()))
-            
-            reqs_e = obtener_requisitos_etapa(e_sel_cfg)
-            st.write("**Requisitos Actuales:**")
-            for r_id, r_txt, es_g in reqs_e:
-                c1, c2 = st.columns([4, 1])
-                with c1:
-                    st.write(f"• {r_txt} {'(Grupal)' if es_g == 1 else ''}")
-                with c2:
-                    if st.button("🗑️ Eliminar", key=f"del_r_{r_id}"):
-                        conn = sqlite3.connect(DB_FILE)
-                        c = conn.cursor()
-                        c.execute('DELETE FROM requisitos_etapas WHERE id = ?', (r_id,))
-                        conn.commit()
-                        conn.close()
-                        st.success("Requisito eliminado.")
-                        st.rerun()
-                        
-            st.markdown("---")
-            with st.form("form_add_req"):
-                st.write("Agregar Nuevo Requisito a la Etapa")
-                new_req_txt = st.text_input("Descripción del Requisito")
-                es_g_val = st.checkbox("¿Es un grupo terapéutico contabilizable?")
-                if st.form_submit_button("➕ Agregar Requisito"):
-                    if new_req_txt.strip():
-                        conn = sqlite3.connect(DB_FILE)
-                        c = conn.cursor()
-                        c.execute('INSERT INTO requisitos_etapas (etapa, requisito, es_grupo) VALUES (?, ?, ?)', (e_sel_cfg, new_req_txt.strip(), 1 if es_g_val else 0))
-                        conn.commit()
-                        conn.close()
-                        st.success("Requisito agregado.")
-                        st.rerun()
+    with tab_pass:
+        st.subheader("🔑 Cambiar Mi Contraseña")
+        with st.form("form_change_pass"):
+            p_act = st.text_input("Contraseña Actual", type="password")
+            p_new = st.text_input("Nueva Contraseña", type="password")
+            p_cnf = st.text_input("Confirmar Nueva Contraseña", type="password")
+            if st.form_submit_button("Actualizar Contraseña"):
+                res = verificar_login(st.session_state["username"], p_act)
+                if not res:
+                    st.error("❌ La contraseña actual es incorrecta.")
+                elif p_new != p_cnf:
+                    st.error("❌ La nueva contraseña y la confirmación no coinciden.")
+                elif len(p_new) < 4:
+                    st.error("❌ La contraseña debe tener al menos 4 caracteres.")
+                else:
+                    conn = sqlite3.connect(DB_FILE)
+                    c = conn.cursor()
+                    c.execute('UPDATE usuarios SET password_hash = ? WHERE username = ?',
+                              (hash_pass(p_new), st.session_state["username"]))
+                    conn.commit()
+                    conn.close()
+                    st.success("✅ Contraseña actualizada exitosamente.")
 
-        with tab_pass_sys:
-            st.subheader("Cambiar Mi Contraseña")
-            with st.form("form_change_my_pass"):
-                p_act = st.text_input("Contraseña Actual", type="password")
-                p_new = st.text_input("Nueva Contraseña", type="password")
-                
-                if st.form_submit_button("🔑 Actualizar Contraseña"):
-                    if verificar_login(st.session_state["username"], p_act):
-                        conn = sqlite3.connect(DB_FILE)
-                        c = conn.cursor()
-                        c.execute('UPDATE usuarios SET password_hash = ? WHERE username = ?', (hash_pass(p_new), st.session_state["username"]))
-                        conn.commit()
-                        conn.close()
-                        st.success("Contraseña actualizada exitosamente.")
-                    else:
-                        st.error("Contraseña actual incorrecta.")
-
-    # --- SECCIÓN 10: RESPALDO Y RESTAURACIÓN (EXCLUSIVO ADMIN) ---
-    elif menu == "📦 Respaldo y Restauración":
-        if not es_admin():
-            st.error("⛔ Acceso denegado: Este módulo es exclusivo para el Administrador del Sistema.")
-            st.stop()
-            
-        st.title("📦 Respaldo y Restauración de Base de Datos")
+    with tab_reqs:
+        st.subheader("⚙️ Configuración Dinámica de Requisitos por Etapa")
+        sel_e_conf = st.selectbox("Selecciona Etapa a Configurar", ['ACOGIDA', 'IDENTIFICACIÓN', 'ELABORACIÓN', 'CONSOLIDACIÓN', 'SERVICIO SOCIAL'])
         
-        tab_back, tab_rest = st.tabs(["📥 Descargar Respaldo (.db)", "📤 Restaurar Base de Datos"])
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute('SELECT id, requisito, es_grupo FROM requisitos_etapas WHERE etapa = ?', (sel_e_conf,))
+        reqs_curr = c.fetchall()
+        conn.close()
         
-        with tab_back:
-            st.subheader("Descargar Copia de Seguridad de Toda la Información")
-            st.write("Guarda un archivo `.db` con todos los residentes, grupos, medicamentos y documentos.")
-            
-            if os.path.exists(DB_FILE):
-                with open(DB_FILE, "rb") as f:
-                    db_bytes = f.read()
-                fn_back = f"Sawabona_Respaldo_DB_{datetime.now().strftime('%Y%m%d_%H%M')}.db"
-                st.download_button("📥 Descargar Respaldo de Base de Datos", data=db_bytes, file_name=fn_back, mime="application/octet-stream")
-
-        with tab_rest:
-            st.subheader("Restaurar la Base de Datos desde un Archivo de Respaldo")
-            st.warning("⚠️ **ATENCIÓN**: Restaurar un respaldo sobrescribirá la base de datos actual.")
-            db_up = st.file_uploader("Seleccionar archivo de respaldo (.db)", type=["db", "sqlite"])
-            
-            if db_up is not None:
-                if st.button("⚠️ Confirmar Restauración de Base de Datos"):
-                    with open(DB_FILE, "wb") as f:
-                        f.write(db_up.read())
-                    st.success("🎉 ¡Base de datos restaurada con éxito! La aplicación se reiniciará.")
-                    st.toast("🎉 ¡Restauración completada!")
+        for rq in reqs_curr:
+            c_r1, c_r2 = st.columns([4, 1])
+            c_r1.write(f"📌 {rq[1]} {'(Grupo contabilizado automáticamente)' if rq[2] else ''}")
+            if c_r2.button("🗑️ Eliminar", key=f"del_req_{rq[0]}"):
+                conn = sqlite3.connect(DB_FILE)
+                c = conn.cursor()
+                c.execute('DELETE FROM requisitos_etapas WHERE id = ?', (rq[0],))
+                conn.commit()
+                conn.close()
+                st.rerun()
+        
+        with st.form(f"form_add_req_{sel_e_conf}"):
+            st.markdown("##### ➕ Agregar Nuevo Requisito a esta Etapa")
+            n_req_txt = st.text_input("Texto del Requisito")
+            n_req_grupo = st.checkbox("¿Es un conteo automático de grupo?")
+            if st.form_submit_button("Agregar Requisito"):
+                if n_req_txt.strip():
+                    conn = sqlite3.connect(DB_FILE)
+                    c = conn.cursor()
+                    c.execute('INSERT INTO requisitos_etapas (etapa, requisito, es_grupo) VALUES (?, ?, ?)',
+                              (sel_e_conf, n_req_txt.strip(), 1 if n_req_grupo else 0))
+                    conn.commit()
+                    conn.close()
+                    st.success("Requisito agregado.")
                     st.rerun()
