@@ -159,8 +159,8 @@ def verificar_login(username, password):
     conn.close()
     if res:
         if res[2] == 1:
-            return 1
-        return res
+            return 1 # Usuario Bloqueado
+        return res[1] # Nombre completo
     return None
 
 def guardar_entrevista(paciente_id, datos, usuario):
@@ -217,9 +217,9 @@ def check_duplicate_patient(nombre, ap_p, ap_m, exp, current_pid=None):
         full_p = f"{d.get('nombre', '')} {d.get('ap_paterno', '')} {d.get('ap_materno', '')}".strip().lower()
         p_exp = str(d.get("num_expediente", "")).strip()
         if target_name and full_p == target_name:
-            return True, f"Ya existe un paciente con el nombre '{d.get('nombre', '')} {d.get('ap_paterno', '')} {d.get('ap_materno', '')}' (Folio: {pid}, Exp: {p_exp})."
+            return True, f"Ya existe un paciente registrado con el nombre '{d.get('nombre', '')} {d.get('ap_paterno', '')} {d.get('ap_materno', '')}' (Folio: {pid}, Exp: {p_exp})."
         if exp and p_exp and exp.strip() == p_exp:
-            return True, f"El número de expediente '{exp}' ya está asignado a '{d.get('nombre', '')} {d.get('ap_paterno', '')}' (Folio: {pid})."
+            return True, f"El número de expediente '{exp}' ya está asignado al paciente '{d.get('nombre', '')} {d.get('ap_paterno', '')}' (Folio: {pid})."
     return False, ""
 
 # --- GENERADORES DE REPORTES PDF ---
@@ -244,7 +244,7 @@ def generar_pdf_listado_pacientes():
     pdf.set_auto_page_break(auto=True, margin=15)
     
     pdf.set_font("Helvetica", "B", 8)
-    col_w = [30, 65, 20, 20, 35, 25, 25, 25]
+    col_w = [35, 65, 20, 20, 35, 25, 25, 25]
     headers = ["Folio / Exp.", "Nombre Completo", "Sexo", "Edad", "Etapa Actual", "Dias Proceso", "Dias Etapa", "Estado"]
     
     for i, h in enumerate(headers):
@@ -393,14 +393,12 @@ def main():
         
     if "msg_success" in st.session_state:
         st.success(st.session_state["msg_success"])
-        if st.session_state.get("trigger_balloons", False):
-            st.balloons()
-            st.session_state["trigger_balloons"] = False
+        st.balloons()
         del st.session_state["msg_success"]
         
     if not st.session_state["logged_in"]:
         st.subheader("🔐 Inicio de Sesión - Personal Autorizado")
-        col1, col2, col3 = st.columns([1, 2, 1])
+        col1, col2, col3 = st.columns(3)
         with col2:
             with st.form("login_form"):
                 user = st.text_input("Usuario")
@@ -413,8 +411,8 @@ def main():
                             st.error("⛔ Esta cuenta se encuentra bloqueada. Contacte al administrador.")
                         else:
                             st.session_state["logged_in"] = True
-                            st.session_state["username"] = res[0]
-                            st.session_state["nombre_completo"] = res[1]
+                            st.session_state["username"] = user
+                            st.session_state["nombre_completo"] = res
                             st.rerun()
                     else:
                         st.error("Usuario o contraseña incorrectos")
@@ -526,58 +524,60 @@ def main():
     elif menu == "👤 Registro y Edición de Pacientes":
         st.title("👤 Registro y Edición de Pacientes / Residentes")
         
-        next_num = len(listar_pacientes()) + 1
-        if "alta_pid" not in st.session_state:
-            st.session_state["alta_pid"] = f"PAC-{next_num:03d}"
-        if "alta_nombre" not in st.session_state:
-            st.session_state["alta_nombre"] = ""
-        if "alta_ap_paterno" not in st.session_state:
-            st.session_state["alta_ap_paterno"] = ""
-        if "alta_ap_materno" not in st.session_state:
-            st.session_state["alta_ap_materno"] = ""
-        if "alta_num_exp" not in st.session_state:
-            st.session_state["alta_num_exp"] = f"{next_num + 100}"
-        if "alta_sexo" not in st.session_state:
-            st.session_state["alta_sexo"] = "Masculino"
-        if "alta_fecha_nac" not in st.session_state:
-            st.session_state["alta_fecha_nac"] = date(1995, 1, 1)
-        if "alta_fecha_ing" not in st.session_state:
-            st.session_state["alta_fecha_ing"] = date.today()
-        if "alta_etapa_act" not in st.session_state:
-            st.session_state["alta_etapa_act"] = "Acogida"
-        if "alta_fecha_ini_etapa" not in st.session_state:
-            st.session_state["alta_fecha_ini_etapa"] = date.today()
-
         tab_alta, tab_edit, tab_bloq = st.tabs(["➕ Alta de Nuevo Paciente", "✏️ Editar Paciente Existente", "🔒 Gestión de Bloqueo / Bajas"])
         
-        # --- ALTA DE PACIENTE ---
+        # --- ALTA DE PACIENTE (TABULACIÓN EN ORDEN EXACTO SOLICITADO) ---
         with tab_alta:
             st.subheader("➕ Registrar Nuevo Residente")
+            pacientes_all = listar_pacientes()
+            next_num = len(pacientes_all) + 1
+            default_pid = f"PAC-{next_num:03d}"
+            default_exp = f"{next_num + 100}"
             
             with st.form("form_alta_paciente"):
-                c1, c2, c3 = st.columns(3)
-                with c1:
-                    pid = st.text_input("Folio Único / ID Paciente *", key="alta_pid")
-                    nombre = st.text_input("Nombre(s) *", key="alta_nombre")
-                    sexo = st.selectbox("Sexo *", ["Masculino", "Femenino", "Otro"], key="alta_sexo")
-                with c2:
-                    num_exp = st.text_input("Número de Expediente *", key="alta_num_exp")
-                    ap_paterno = st.text_input("Apellido Paterno *", key="alta_ap_paterno")
-                    fecha_nac = st.date_input("Fecha de Nacimiento", key="alta_fecha_nac")
-                with c3:
-                    etapa_act = st.selectbox("Etapa Inicial", ["Acogida", "Identificación", "Elaboración", "Consolidación", "Servicio Social"], key="alta_etapa_act")
-                    ap_materno = st.text_input("Apellido Materno", key="alta_ap_materno")
-                    fecha_ing = st.date_input("Fecha de Ingreso Institucional", key="alta_fecha_ing")
+                # Orden de tabulación solicitado:
+                # 1. Folio único | 2. Expediente
+                r1_c1, r1_c2 = st.columns(2)
+                with r1_c1:
+                    pid = st.text_input("Folio Único / ID Paciente *", value=default_pid)
+                with r1_c2:
+                    num_exp = st.text_input("Número de Expediente *", value=default_exp)
                     
-                fecha_ini_etapa = st.date_input("Fecha Inicio de Etapa Actual", key="alta_fecha_ini_etapa")
+                # 3. Nombre | 4. Apellido paterno
+                r2_c1, r2_c2 = st.columns(2)
+                with r2_c1:
+                    nombre = st.text_input("Nombre(s) *")
+                with r2_c2:
+                    ap_paterno = st.text_input("Apellido Paterno *")
+                    
+                # 5. Apellido materno | 6. Sexo
+                r3_c1, r3_c2 = st.columns(2)
+                with r3_c1:
+                    ap_materno = st.text_input("Apellido Materno")
+                with r3_c2:
+                    sexo = st.selectbox("Sexo *", ["Masculino", "Femenino", "Otro"])
+                    
+                # 7. Fecha de nacimiento | 8. Fecha de ingreso institucional
+                r4_c1, r4_c2 = st.columns(2)
+                with r4_c1:
+                    fecha_nac = st.date_input("Fecha de Nacimiento", value=date(1995, 1, 1))
+                with r4_c2:
+                    fecha_ing = st.date_input("Fecha de Ingreso Institucional", value=date.today())
+                    
+                # 9. Etapa | 10. Fecha de inicio de etapa actual
+                r5_c1, r5_c2 = st.columns(2)
+                with r5_c1:
+                    etapa_act = st.selectbox("Etapa Inicial", ["Acogida", "Identificación", "Elaboración", "Consolidación", "Servicio Social"])
+                with r5_c2:
+                    fecha_ini_etapa = st.date_input("Fecha Inicio de Etapa Actual", value=date.today())
                 
                 sub_alta = st.form_submit_button("💾 Guardar y Dar de Alta Residente", use_container_width=True)
                 
                 if sub_alta:
-                    if not nombre.strip() or not ap_paterno.strip() or not pid.strip() or not num_exp.strip():
-                        st.error("⚠️ Por favor llene los campos obligatorios (*): Nombre, Apellido Paterno, Folio y No. de Expediente.")
+                    if not nombre or not ap_paterno or not pid or not num_exp:
+                        st.error("⚠️ Por favor llene los campos obligatorios (*): Nombre, Apellido Paterno, Folio y Expediente.")
                     else:
-                        dup, msg_dup = check_duplicate_patient(nombre.strip(), ap_paterno.strip(), ap_materno.strip(), num_exp.strip())
+                        dup, msg_dup = check_duplicate_patient(nombre, ap_paterno, ap_materno, num_exp)
                         if dup:
                             st.error(f"⛔ {msg_dup}")
                         else:
@@ -593,25 +593,11 @@ def main():
                                 "fecha_inicio_etapa": str(fecha_ini_etapa),
                                 "bloqueado": False
                             }
-                            guardar_entrevista(pid.strip(), datos_pac, st.session_state["username"])
-                            
-                            new_count = len(listar_pacientes()) + 1
-                            st.session_state["alta_pid"] = f"PAC-{new_count:03d}"
-                            st.session_state["alta_nombre"] = ""
-                            st.session_state["alta_ap_paterno"] = ""
-                            st.session_state["alta_ap_materno"] = ""
-                            st.session_state["alta_num_exp"] = f"{new_count + 100}"
-                            st.session_state["alta_sexo"] = "Masculino"
-                            st.session_state["alta_fecha_nac"] = date(1995, 1, 1)
-                            st.session_state["alta_fecha_ing"] = date.today()
-                            st.session_state["alta_etapa_act"] = "Acogida"
-                            st.session_state["alta_fecha_ini_etapa"] = date.today()
-
-                            st.session_state["msg_success"] = f"🎉 ¡Residente '{nombre.strip()} {ap_paterno.strip()}' registrado exitosamente con Folio {pid.strip()}!"
-                            st.session_state["trigger_balloons"] = True
+                            guardar_entrevista(pid, datos_pac, st.session_state["username"])
+                            st.session_state["msg_success"] = f"🎉 ¡Residente '{nombre} {ap_paterno}' registrado exitosamente con Folio {pid}!"
                             st.rerun()
 
-        # --- EDICIÓN DE PACIENTE ---
+        # --- EDICIÓN DE PACIENTES ---
         with tab_edit:
             st.subheader("✏️ Editar Datos de Residente")
             pacientes_list = listar_pacientes()
@@ -632,26 +618,42 @@ def main():
                 curr_pid, curr_d = dict_pacientes[sel_pac]
                 
                 with st.form("form_edit_paciente"):
-                    ce1, ce2, ce3 = st.columns(3)
-                    with ce1:
-                        e_nombre = st.text_input("Nombre(s)", value=curr_d.get("nombre", ""))
-                        e_sexo = st.selectbox("Sexo", ["Masculino", "Femenino", "Otro"], index=get_safe_index(["Masculino", "Femenino", "Otro"], curr_d.get("sexo", "Masculino")))
-                        e_etapa = st.selectbox("Etapa Actual", ["Acogida", "Identificación", "Elaboración", "Consolidación", "Servicio Social"], index=get_safe_index(["Acogida", "Identificación", "Elaboración", "Consolidación", "Servicio Social"], curr_d.get("etapa_actual", "Acogida")))
-                    with ce2:
-                        e_ap_p = st.text_input("Apellido Paterno", value=curr_d.get("ap_paterno", ""))
+                    er1_c1, er1_c2 = st.columns(2)
+                    with er1_c1:
+                        st.text_input("Folio Único (No modificable)", value=curr_pid, disabled=True)
+                    with er1_c2:
                         e_exp = st.text_input("Número de Expediente", value=curr_d.get("num_expediente", ""))
+                        
+                    er2_c1, er2_c2 = st.columns(2)
+                    with er2_c1:
+                        e_nombre = st.text_input("Nombre(s)", value=curr_d.get("nombre", ""))
+                    with er2_c2:
+                        e_ap_p = st.text_input("Apellido Paterno", value=curr_d.get("ap_paterno", ""))
+                        
+                    er3_c1, er3_c2 = st.columns(2)
+                    with er3_c1:
+                        e_ap_m = st.text_input("Apellido Materno", value=curr_d.get("ap_materno", ""))
+                    with er3_c2:
+                        e_sexo = st.selectbox("Sexo", ["Masculino", "Femenino", "Otro"], index=get_safe_index(["Masculino", "Femenino", "Otro"], curr_d.get("sexo", "Masculino")))
+                        
+                    er4_c1, er4_c2 = st.columns(2)
+                    with er4_c1:
                         try:
                             fn_val = datetime.strptime(curr_d.get("fecha_nacimiento", "1995-01-01"), "%Y-%m-%d").date()
                         except:
                             fn_val = date(1995, 1, 1)
                         e_fecha_nac = st.date_input("Fecha de Nacimiento", value=fn_val)
-                    with ce3:
-                        e_ap_m = st.text_input("Apellido Materno", value=curr_d.get("ap_materno", ""))
+                    with er4_c2:
                         try:
                             fi_val = datetime.strptime(curr_d.get("fecha_ingreso", str(date.today())), "%Y-%m-%d").date()
                         except:
                             fi_val = date.today()
                         e_fecha_ing = st.date_input("Fecha de Ingreso Institucional", value=fi_val)
+                        
+                    er5_c1, er5_c2 = st.columns(2)
+                    with er5_c1:
+                        e_etapa = st.selectbox("Etapa Actual", ["Acogida", "Identificación", "Elaboración", "Consolidación", "Servicio Social"], index=get_safe_index(["Acogida", "Identificación", "Elaboración", "Consolidación", "Servicio Social"], curr_d.get("etapa_actual", "Acogida")))
+                    with er5_c2:
                         try:
                             fe_val = datetime.strptime(curr_d.get("fecha_inicio_etapa", str(date.today())), "%Y-%m-%d").date()
                         except:
@@ -676,7 +678,6 @@ def main():
                             
                             guardar_entrevista(curr_pid, curr_d, st.session_state["username"])
                             st.session_state["msg_success"] = f"🎉 ¡Datos actualizados correctamente para {e_nombre} {e_ap_p}!"
-                            st.session_state["trigger_balloons"] = True
                             st.rerun()
 
         # --- GESTIÓN DE BLOQUEO / BAJAS ---
@@ -691,7 +692,7 @@ def main():
                     d = {}
                 nom_c = f"{d.get('nombre', '')} {d.get('ap_paterno', '')} {d.get('ap_materno', '')}".strip() or pid
                 is_bloq = d.get("bloqueado", False)
-                cb1, cb2 = st.columns([3, 1])
+                cb1, cb2 = st.columns(2)
                 cb1.write(f"• **{nom_c}** (Folio: `{pid}`, Exp: `{d.get('num_expediente', '')}`) | Estado: **{'🔴 Inactivo / Bloqueado' if is_bloq else '🟢 Activo'}**")
                 if is_bloq:
                     if cb2.button("🟢 Reactivar", key=f"react_{pid}"):
@@ -886,7 +887,6 @@ def main():
                     conn.close()
                     
                     st.session_state["msg_success"] = f"🎉 ¡Ficha de Ingreso guardada para {nombre_completo_fi}!"
-                    st.session_state["trigger_balloons"] = True
                     st.rerun()
 
             if fi_existente:
@@ -958,7 +958,6 @@ def main():
                     
                     guardar_entrevista(pid_ei, datos_exist, st.session_state["username"])
                     st.session_state["msg_success"] = f"🎉 ¡Entrevista inicial guardada para {pid_ei}!"
-                    st.session_state["trigger_balloons"] = True
                     st.rerun()
 
     # --- MÓDULO 5: CONSEJERÍAS INDIVIDUALES ---
@@ -995,7 +994,6 @@ def main():
                 conn.commit()
                 conn.close()
                 st.session_state["msg_success"] = f"🎉 ¡Consejería #{num_cons} registrada para {pid_c}!"
-                st.session_state["trigger_balloons"] = True
                 st.rerun()
 
     # --- MÓDULO 6: GESTIÓN DE ETAPAS & PROCESO ---
@@ -1040,10 +1038,7 @@ def main():
                     d_e["fecha_inicio_etapa"] = str(date.today())
                     guardar_entrevista(pid_e, d_e, st.session_state["username"])
                     st.session_state["msg_success"] = f"🎉 ¡Residente {pid_e} promovido a {next_etapa}!"
-                    st.session_state["trigger_balloons"] = True
                     st.rerun()
-            else:
-                st.success("🏆 El residente se encuentra en la última etapa (Servicio Social).")
 
     # --- MÓDULO 7: GRUPOS TERAPÉUTICOS ---
     elif menu == "🗣️ Grupos Terapéuticos":
@@ -1064,7 +1059,6 @@ def main():
                 conn.commit()
                 conn.close()
                 st.session_state["msg_success"] = f"🎉 ¡Sesión de grupo de {t_grupo} guardada!"
-                st.session_state["trigger_balloons"] = True
                 st.rerun()
 
     # --- MÓDULO 8: CONTROL DE MEDICAMENTOS ---
@@ -1085,7 +1079,6 @@ def main():
                 conn.commit()
                 conn.close()
                 st.session_state["msg_success"] = f"🎉 Medicamento {n_med} agregado!"
-                st.session_state["trigger_balloons"] = True
                 st.rerun()
 
     # --- MÓDULO 9: REPOSITORIO DE DOCUMENTOS ---
@@ -1163,11 +1156,10 @@ def main():
                         conn = sqlite3.connect(DB_FILE)
                         c = conn.cursor()
                         c.execute("SELECT count(*) FROM entrevistas")
-                        count_e = c.fetchone()[0]
+                        count_e = c.fetchone()
                         conn.close()
                         
-                        st.session_state["msg_success"] = f"🎉 ¡Base de datos restaurada con éxito! Se cargaron {count_e} registros."
-                        st.session_state["trigger_balloons"] = True
+                        st.session_state["msg_success"] = f"🎉 ¡Base de datos restaurada con éxito! Se cargaron {count_e[0]} registros."
                         st.rerun()
                     except Exception as err:
                         st.error(f"❌ Error al restaurar la base de datos: {err}")
