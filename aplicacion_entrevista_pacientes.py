@@ -21,7 +21,6 @@ DB_FILE = "sistema_pacientes.db"
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # Tabla de Usuarios Administrativos (Login)
     c.execute('''
         CREATE TABLE IF NOT EXISTS usuarios (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -30,7 +29,6 @@ def init_db():
             nombre_completo TEXT
         )
     ''')
-    # Tabla de Pacientes / Residentes
     c.execute('''
         CREATE TABLE IF NOT EXISTS pacientes (
             paciente_id TEXT PRIMARY KEY,
@@ -49,7 +47,6 @@ def init_db():
             usuario_registro TEXT
         )
     ''')
-    # Tabla de Entrevistas de Consejería
     c.execute('''
         CREATE TABLE IF NOT EXISTS entrevistas (
             paciente_id TEXT PRIMARY KEY,
@@ -59,7 +56,6 @@ def init_db():
             datos_json TEXT
         )
     ''')
-    # Tabla de Medicamentos e Inventario
     c.execute('''
         CREATE TABLE IF NOT EXISTS medicamentos (
             paciente_id TEXT PRIMARY KEY,
@@ -70,7 +66,6 @@ def init_db():
             usuario_registro TEXT
         )
     ''')
-    # Tabla de Historial de Entregas
     c.execute('''
         CREATE TABLE IF NOT EXISTS entregas_medicamentos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -80,7 +75,6 @@ def init_db():
             detalle_json TEXT
         )
     ''')
-    # Tabla de Grupos Terapéuticos
     c.execute('''
         CREATE TABLE IF NOT EXISTS grupos_terapeutos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -94,7 +88,6 @@ def init_db():
             usuario_registro TEXT
         )
     ''')
-    # Tabla de Historial de Cambios de Etapa
     c.execute('''
         CREATE TABLE IF NOT EXISTS historial_etapas (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -105,7 +98,6 @@ def init_db():
             usuario_autoriza TEXT
         )
     ''')
-    # Tabla de Requisitos por Etapa
     c.execute('''
         CREATE TABLE IF NOT EXISTS requisitos_etapas (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -115,14 +107,12 @@ def init_db():
         )
     ''')
     
-    # Crear admin por defecto si no existe
     c.execute('SELECT * FROM usuarios WHERE username = ?', ('admin',))
     if not c.fetchone():
         default_pass = hashlib.sha256("admin123".encode()).hexdigest()
         c.execute('INSERT INTO usuarios (username, password_hash, nombre_completo) VALUES (?, ?, ?)',
                   ('admin', default_pass, 'Administrador del Sistema'))
                   
-    # Poblar Requisitos Iniciales de Etapas
     c.execute('SELECT COUNT(*) FROM requisitos_etapas')
     if c.fetchone()[0] == 0:
         reqs = [
@@ -173,11 +163,63 @@ def hash_pass(password):
 def verificar_login(username, password):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('SELECT username, nombre_completo FROM usuarios WHERE username = ? AND password_hash = ?',
+    c.execute('SELECT username, nombre_completo, COALESCE(rol, "Administrador"), COALESCE(estatus, "A") FROM usuarios WHERE username = ? AND password_hash = ?',
               (username, hash_pass(password)))
     result = c.fetchone()
     conn.close()
-    return result
+    if result:
+        u_name, u_full, u_rol, u_est = result
+        if u_est == 'B':
+            return "BLOQUEADO"
+        return (u_name, u_full, u_rol)
+    return None
+
+def obtener_usuarios_sistema():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('SELECT id, username, nombre_completo, COALESCE(rol, "Administrador"), COALESCE(estatus, "A") FROM usuarios ORDER BY username')
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def guardar_usuario_sistema(username, password, nombre_completo, rol, estatus='A'):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('SELECT id FROM usuarios WHERE username = ?', (username,))
+    row = c.fetchone()
+    if row:
+        if password and password.strip():
+            c.execute('UPDATE usuarios SET nombre_completo = ?, rol = ?, estatus = ?, password_hash = ? WHERE username = ?',
+                      (nombre_completo, rol, estatus, hash_pass(password), username))
+        else:
+            c.execute('UPDATE usuarios SET nombre_completo = ?, rol = ?, estatus = ? WHERE username = ?',
+                      (nombre_completo, rol, estatus, username))
+    else:
+        if not password or not password.strip():
+            conn.close()
+            return False, "La contraseña es obligatoria para nuevos usuarios."
+        c.execute('INSERT INTO usuarios (username, password_hash, nombre_completo, rol, estatus) VALUES (?, ?, ?, ?, ?)',
+                  (username, hash_pass(password), nombre_completo, rol, estatus))
+    conn.commit()
+    conn.close()
+    return True, "Usuario guardado exitosamente."
+
+def cambiar_estatus_usuario_sistema(username, nuevo_estatus):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('UPDATE usuarios SET estatus = ? WHERE username = ?', (nuevo_estatus, username))
+    conn.commit()
+    conn.close()
+
+def eliminar_usuario_sistema(username):
+    if username == "admin":
+        return False, "No se puede eliminar la cuenta principal de admin."
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('DELETE FROM usuarios WHERE username = ?', (username,))
+    conn.commit()
+    conn.close()
+    return True, "Usuario eliminado." 
 
 def limpiar_texto(texto):
     if not texto:
@@ -382,96 +424,6 @@ def listar_grupos_paciente(paciente_id):
     rows = c.fetchall()
     conn.close()
     return rows
-
-
-def modificar_grupo_terapeuto(grupo_id, fecha_grupo, facilitador, datos, usuario_reg):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    f_grp = fecha_grupo.strftime("%Y-%m-%d") if isinstance(fecha_grupo, (date, datetime)) else str(fecha_grupo)
-    datos_json = json.dumps(datos, ensure_ascii=False)
-    
-    c.execute("""
-        UPDATE grupos_terapeutos 
-        SET fecha_grupo = ?, facilitador = ?, datos_json = ?, usuario_registro = ?
-        WHERE id = ?
-    """, (f_grp, facilitador, datos_json, usuario_reg, grupo_id))
-    
-    conn.commit()
-    conn.close()
-
-def eliminar_grupo_terapeuto(grupo_id):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("DELETE FROM grupos_terapeutos WHERE id = ?", (grupo_id,))
-    conn.commit()
-    conn.close()
-
-def generar_pdf_sesion_grupo(grupo_id):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("""
-        SELECT id, paciente_id, tipo_grupo, etapa_al_momento, fecha_grupo, facilitador, datos_json, fecha_registro, usuario_registro
-        FROM grupos_terapeutos WHERE id = ?
-    """, (grupo_id,))
-    row = c.fetchone()
-    conn.close()
-    
-    if not row:
-        return None
-        
-    gid, pid, tgrp, etapa, fgrp, fac, djson, freg, ureg = row
-    datos = json.loads(djson)
-    p = obtener_paciente(pid)
-    pnom = p[1] if p else pid
-    
-    pdf = PDFReport()
-    pdf.add_page()
-    pdf.set_auto_page_break(auto=True, margin=15)
-    
-    pdf.set_font("Helvetica", "B", 12)
-    pdf.cell(pdf.epw, 8, "COMPROBANTE DE SESIÓN DE GRUPO TERAPÉUTICO", new_x="LMARGIN", new_y="NEXT", align="C")
-    pdf.set_font("Helvetica", "", 10)
-    pdf.cell(pdf.epw, 6, f"Fecha de impresión: {datetime.now().strftime('%d/%m/%Y %H:%M')}", new_x="LMARGIN", new_y="NEXT", align="C")
-    pdf.ln(4)
-    
-    pdf.set_font("Helvetica", "B", 10)
-    pdf.cell(pdf.epw, 6, "DATOS DEL PACIENTE", border="B", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("Helvetica", "", 9)
-    pdf.cell(pdf.epw, 5, f"Nombre del Paciente: {limpiar_texto(pnom)}", new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(pdf.epw, 5, f"Folio / Expediente: {pid}", new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(pdf.epw, 5, f"Etapa al Momento de la Sesión: {etapa}", new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(3)
-    
-    modalidad = datos.get("modalidad", "Normal")
-    pdf.set_font("Helvetica", "B", 10)
-    pdf.cell(pdf.epw, 6, f"DATOS DE LA SESIÓN ({tgrp})", border="B", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("Helvetica", "", 9)
-    pdf.cell(pdf.epw, 5, f"Tipo de Grupo: {tgrp}", new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(pdf.epw, 5, f"Modalidad: {modalidad}", new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(pdf.epw, 5, f"Fecha de la Sesión: {fgrp}", new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(pdf.epw, 5, f"Facilitador / Staff: {limpiar_texto(fac)}", new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(3)
-    
-    pdf.set_font("Helvetica", "B", 10)
-    pdf.cell(pdf.epw, 6, "DESARROLLO Y CONTENIDO", border="B", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("Helvetica", "", 9)
-    
-    if tgrp in ["Terapia de Grupo", "Aquí y Ahora", "Confronto Especial"]:
-        pdf.multi_cell(pdf.epw, 5, f"Compartimiento: {limpiar_texto(datos.get('compartimiento', ''))}", new_x="LMARGIN", new_y="NEXT")
-        pdf.multi_cell(pdf.epw, 5, f"Observaciones: {limpiar_texto(datos.get('observaciones', ''))}", new_x="LMARGIN", new_y="NEXT")
-        pdf.multi_cell(pdf.epw, 5, f"Devoluciones: {limpiar_texto(datos.get('devoluciones', ''))}", new_x="LMARGIN", new_y="NEXT")
-        pdf.multi_cell(pdf.epw, 5, f"¿Cómo se queda y compromiso?: {limpiar_texto(datos.get('compromiso', ''))}", new_x="LMARGIN", new_y="NEXT")
-    else:
-        pdf.multi_cell(pdf.epw, 5, f"Logros: {limpiar_texto(datos.get('logros', ''))}", new_x="LMARGIN", new_y="NEXT")
-        pdf.multi_cell(pdf.epw, 5, f"Dificultades: {limpiar_texto(datos.get('dificultades', ''))}", new_x="LMARGIN", new_y="NEXT")
-        pdf.multi_cell(pdf.epw, 5, f"Observaciones: {limpiar_texto(datos.get('observaciones', ''))}", new_x="LMARGIN", new_y="NEXT")
-        pdf.multi_cell(pdf.epw, 5, f"Devoluciones: {limpiar_texto(datos.get('devoluciones', ''))}", new_x="LMARGIN", new_y="NEXT")
-        pdf.multi_cell(pdf.epw, 5, f"¿Cómo se queda y compromiso?: {limpiar_texto(datos.get('compromiso', ''))}", new_x="LMARGIN", new_y="NEXT")
-        
-    pdf_filename = f"Sesion_Grupo_{pid}_{grupo_id}_{datetime.now().strftime('%Y%m%d')}.pdf"
-    pdf.output(pdf_filename)
-    return pdf_filename
-
 
 def cambiar_etapa_paciente(paciente_id, etapa_origen, etapa_destino, usuario_autoriza):
     conn = sqlite3.connect(DB_FILE)
@@ -790,12 +742,7 @@ def generar_pdf_historial_grupos(paciente_id):
             pdf.cell(pdf.epw, 6, f"GRUPO: {limpiar_texto(tgrp)} | Etapa: {etapa} | Fecha: {fgrp} | Facilitador: {limpiar_texto(fac)}", border="B", new_x="LMARGIN", new_y="NEXT")
             pdf.set_font("Helvetica", "", 9)
             
-            modalidad = datos.get("modalidad", "Normal")
-            pdf.set_font("Helvetica", "B", 10)
-            pdf.cell(pdf.epw, 6, f"GRUPO: {limpiar_texto(tgrp)} ({modalidad}) | Etapa: {etapa} | Fecha: {fgrp} | Facilitador: {limpiar_texto(fac)}", border="B", new_x="LMARGIN", new_y="NEXT")
-            pdf.set_font("Helvetica", "", 9)
-            
-            if tgrp in ["Terapia de Grupo", "Aquí y Ahora", "Confronto Especial"]:
+            if tgrp in ["Terapia de Grupo", "Aquí y Ahora"]:
                 pdf.multi_cell(pdf.epw, 5, f"Compartimiento: {limpiar_texto(datos.get('compartimiento', ''))}", new_x="LMARGIN", new_y="NEXT")
                 pdf.multi_cell(pdf.epw, 5, f"Observaciones: {limpiar_texto(datos.get('observaciones', ''))}", new_x="LMARGIN", new_y="NEXT")
                 pdf.multi_cell(pdf.epw, 5, f"Devoluciones: {limpiar_texto(datos.get('devoluciones', ''))}", new_x="LMARGIN", new_y="NEXT")
@@ -837,10 +784,13 @@ if not st.session_state["logged_in"]:
             
             if submit:
                 usuario_valido = verificar_login(user_input, pass_input)
-                if usuario_valido:
+                if usuario_valido == "BLOQUEADO":
+                    st.error("❌ La cuenta de este usuario se encuentra temporalmente bloqueada/inactiva (periodo de vacaciones). Contacte al Administrador.")
+                elif usuario_valido:
                     st.session_state["logged_in"] = True
                     st.session_state["username"] = usuario_valido[0]
                     st.session_state["nombre_completo"] = usuario_valido[1]
+                    st.session_state["rol"] = usuario_valido[2]
                     st.toast("🎉 ¡Acceso concedido!")
                     st.success("¡Acceso concedido!")
                     st.rerun()
@@ -851,7 +801,7 @@ if not st.session_state["logged_in"]:
 else:
     # --- BARRA LATERAL ---
     st.sidebar.title("🌱 Sawabona Shikoba")
-    st.sidebar.write(f"👤 **Usuario Staff**: {st.session_state['nombre_completo']}")
+    st.sidebar.write(f"👤 **Usuario Staff**: {st.session_state['nombre_completo']} | Rol: **{st.session_state.get('rol', 'Administrador')}**")
     
     menu = st.sidebar.radio(
         "Navegación del Sistema",
@@ -1162,10 +1112,10 @@ else:
     # --- SECCIÓN 3: GRUPOS TERAPÉUTICOS ---
     # ==========================================
     elif menu == "🗣️ Grupos Terapéuticos":
-        st.title("🗣️ Registro de Grupos Terapéuticos")
-        st.caption("Módulo para capturar, modificar, eliminar y consultar sesiones de Terapia de Grupo, Aquí y Ahora, Feedback y Confronto Especial")
+        st.title("🗣️ Registro y Gestión de Grupos Terapéuticos")
+        st.caption("Módulo para capturar, editar, eliminar y consultar sesiones de Terapia de Grupo, Aquí y Ahora, Feedback y Confronto Especial")
         
-        tab_reg_g, tab_hist_g = st.tabs(["📝 Registrar / Gestionar Sesión de Grupo", "📜 Historial y Conteo por Etapa"])
+        tab_reg_g, tab_hist_g = st.tabs(["📝 Captura y Gestión de Grupos", "📜 Historial y Conteo de Sesiones"])
         
         with tab_reg_g:
             pacientes_activos = listar_pacientes_bd('A')
@@ -1176,177 +1126,122 @@ else:
                 sel_pac_g = st.selectbox("🔑 Selecciona el Paciente", list(dict_pac_g.keys()), key="sel_grp_pac")
                 p_id_g, p_nombre_g, p_etapa_g = dict_pac_g[sel_pac_g]
                 
-                tipo_grupo = st.selectbox("🗣️ Tipo de Grupo Terapéutico", ["Terapia de Grupo", "Aquí y Ahora", "Feedback", "Confronto Especial"], key="sel_tipo_grupo")
+                st.divider()
+                modo_grp = st.radio("Acción a Realizar:", ["🆕 Registrar Nueva Sesión de Grupo", "✏️ Editar / Modificar Sesión Existente"], horizontal=True, key="modo_grp_radio")
                 
-                accion_grupo = st.radio("Acción a realizar para este grupo:", ["🆕 Registrar Nueva Sesión", "✏️ Modificar / Eliminar Sesión Existente"], horizontal=True, key="radio_accion_grupo")
+                grupos_previos = listar_grupos_paciente(p_id_g)
+                g_edit_id = None
+                g_edit_data = None
                 
-                if accion_grupo == "🆕 Registrar Nueva Sesión":
-                    form_key_grp = f"form_new_grp_{p_id_g}_{tipo_grupo.replace(' ', '_')}"
-                    with st.form(form_key_grp):
-                        st.subheader(f"📋 Nueva Sesión: {tipo_grupo}")
-                        c_g1, c_g2, c_g3 = st.columns(3)
-                        with c_g1:
-                            st.text_input("Paciente", value=p_nombre_g, disabled=True)
-                            st.text_input("Folio", value=p_id_g, disabled=True)
-                        with c_g2:
-                            st.text_input("Etapa Actual del Paciente", value=p_etapa_g, disabled=True)
-                            f_grupo = st.date_input("Fecha del Grupo", value=date.today())
-                        with c_g3:
-                            facilitador_nombre = st.text_input("Facilitador / Staff *", value=st.session_state["nombre_completo"])
-                            modalidad_grupo = st.radio("Modalidad del Grupo *", ["Normal", "Especial"], horizontal=True, index=0)
-                            
-                        st.divider()
-                        
-                        if tipo_grupo in ["Terapia de Grupo", "Aquí y Ahora", "Confronto Especial"]:
-                            compartimiento = st.text_area("Compartimiento (Texto largo) *")
-                            observaciones = st.text_area("Observaciones (Texto largo)")
-                            devoluciones = st.text_area("Devoluciones (Texto largo)")
-                            compromiso = st.text_area("¿Cómo se queda y a qué se compromete? *")
-                            
-                            btn_guardar_grupo = st.form_submit_button(f"💾 Guardar Registro de {tipo_grupo}", use_container_width=True)
-                            
-                            if btn_guardar_grupo:
-                                if not facilitador_nombre or not compartimiento or not compromiso:
-                                    st.error("⚠️ Facilitador, Compartimiento y Compromiso son campos obligatorios.")
-                                else:
-                                    datos_grp = {
-                                        "modalidad": modalidad_grupo,
-                                        "compartimiento": compartimiento,
-                                        "observaciones": observaciones,
-                                        "devoluciones": devoluciones,
-                                        "compromiso": compromiso
-                                    }
-                                    guardar_grupo_terapeuto(p_id_g, tipo_grupo, p_etapa_g, f_grupo, facilitador_nombre, datos_grp, st.session_state["username"])
-                                    st.toast(f"🎉 ¡Sesión de {tipo_grupo} registrada exitosamente!")
-                                    st.success(f"✅ ¡Sesión de **{tipo_grupo}** registrada exitosamente para **{p_nombre_g}** ({p_id_g})!")
-                                    st.balloons()
-                                    st.rerun()
-                        else: # Feedback
-                            logros = st.text_area("Logros (Texto largo) *")
-                            dificultades = st.text_area("Dificultades (Texto largo) *")
-                            observaciones = st.text_area("Observaciones (Texto largo)")
-                            devoluciones = st.text_area("Devoluciones (Texto largo)")
-                            compromiso = st.text_area("¿Cómo se queda y a qué se compromete? *")
-                            
-                            btn_guardar_grupo = st.form_submit_button("💾 Guardar Registro de Feedback", use_container_width=True)
-                            
-                            if btn_guardar_grupo:
-                                if not facilitador_nombre or not logros or not dificultades or not compromiso:
-                                    st.error("⚠️ Facilitador, Logros, Dificultades y Compromiso son campos obligatorios.")
-                                else:
-                                    datos_grp = {
-                                        "modalidad": modalidad_grupo,
-                                        "logros": logros,
-                                        "dificultades": dificultades,
-                                        "observaciones": observaciones,
-                                        "devoluciones": devoluciones,
-                                        "compromiso": compromiso
-                                    }
-                                    guardar_grupo_terapeuto(p_id_g, tipo_grupo, p_etapa_g, f_grupo, facilitador_nombre, datos_grp, st.session_state["username"])
-                                    st.toast(f"🎉 ¡Sesión de Feedback registrada exitosamente!")
-                                    st.success(f"✅ ¡Sesión de **Feedback** registrada exitosamente para **{p_nombre_g}** ({p_id_g})!")
-                                    st.balloons()
-                                    st.rerun()
-                                    
-                else:
-                    # MODIFICAR O ELIMINAR SESIÓN EXISTENTE
-                    grupos_pac = [g for g in listar_grupos_paciente(p_id_g) if g[1] == tipo_grupo]
-                    if not grupos_pac:
-                        st.info(f"El paciente **{p_nombre_g}** no tiene sesiones registradas del grupo '**{tipo_grupo}**'.")
+                if modo_grp == "✏️ Editar / Modificar Sesión Existente":
+                    if not grupos_previos:
+                        st.info(f"El paciente **{p_nombre_g}** no tiene sesiones registradas para editar.")
                     else:
-                        dict_edit_grp = {f"ID {g[0]} | Fecha: {g[3]} | Facilitador: {g[4]} (Etapa: {g[2]})": g for g in grupos_pac}
-                        sel_grp_edit = st.selectbox("🔑 Selecciona la Sesión a Modificar o Eliminar", list(dict_edit_grp.keys()), key="sel_grp_to_edit")
-                        grp_sel = dict_edit_grp[sel_grp_edit]
-                        g_id, g_tipo, g_etapa, g_fecha_str, g_fac, g_djson, g_freg, g_ureg = grp_sel
-                        g_datos = json.loads(g_djson)
+                        dict_edit_g = {f"{g[3]} - {g[1]} | Fac: {g[4]} (ID: {g[0]})": g for g in grupos_previos}
+                        sel_g_str = st.selectbox("🔑 Selecciona la Sesión de Grupo a Editar", list(dict_edit_g.keys()))
+                        g_edit_data = dict_edit_g[sel_g_str]
+                        g_edit_id = g_edit_data[0]
+                
+                tipo_g_def = g_edit_data[1] if g_edit_data else "Terapia de Grupo"
+                tipos_g_list = ["Terapia de Grupo", "Aquí y Ahora", "Feedback", "Confronto Especial"]
+                idx_tipo = tipos_g_list.index(tipo_g_def) if tipo_g_def in tipos_g_list else 0
+                
+                tipo_grupo = st.selectbox("🗣️ Tipo de Grupo Terapéutico", tipos_g_list, index=idx_tipo, key="sel_tipo_grupo")
+                
+                datos_prev_json = json.loads(g_edit_data[5]) if g_edit_data else {}
+                f_grp_val = datetime.strptime(g_edit_data[3], "%Y-%m-%d").date() if g_edit_data else date.today()
+                fac_grp_val = g_edit_data[4] if g_edit_data else st.session_state["nombre_completo"]
+                is_especial_val = (datos_prev_json.get("modalidad") == "Especial") if g_edit_data else False
+                
+                form_key_grp = f"form_grp_{g_edit_id if g_edit_id else 'nuevo'}"
+                
+                with st.form(form_key_grp):
+                    st.subheader(f"Formulario: {tipo_grupo} ({'Edición ID: '+str(g_edit_id) if g_edit_id else 'Nuevo Registro'})")
+                    c_g1, c_g2, c_g3 = st.columns(3)
+                    with c_g1:
+                        st.text_input("Paciente", value=p_nombre_g, disabled=True)
+                        st.text_input("Folio ID", value=p_id_g, disabled=True)
+                    with c_g2:
+                        st.text_input("Etapa del Paciente", value=p_etapa_g, disabled=True)
+                        f_grupo = st.date_input("Fecha del Grupo", value=f_grp_val)
+                    with c_g3:
+                        facilitador_nombre = st.text_input("Nombre del Facilitador / Staff *", value=fac_grp_val)
+                        es_especial = st.checkbox("¿Es un grupo Especial? (Marcar sólo si aplica)", value=is_especial_val)
+                        modalidad_txt = "Especial" if es_especial else "Normal"
                         
-                        try:
-                            g_fecha_val = datetime.strptime(g_fecha_str, "%Y-%m-%d").date()
-                        except:
-                            g_fecha_val = date.today()
-                            
-                        form_edit_key = f"form_mod_grp_{g_id}"
-                        with st.form(form_edit_key):
-                            st.subheader(f"✏️ Editando Sesión #{g_id}: {tipo_grupo}")
-                            c_m1, c_m2, c_m3 = st.columns(3)
-                            with c_m1:
-                                st.text_input("Paciente", value=p_nombre_g, disabled=True, key=f"m_pnom_{g_id}")
-                                st.text_input("Folio", value=p_id_g, disabled=True, key=f"m_pid_{g_id}")
-                            with c_m2:
-                                st.text_input("Etapa al momento", value=g_etapa, disabled=True, key=f"m_etp_{g_id}")
-                                m_f_grupo = st.date_input("Fecha del Grupo", value=g_fecha_val, key=f"m_fgrp_{g_id}")
-                            with c_m3:
-                                m_fac = st.text_input("Facilitador / Staff *", value=g_fac, key=f"m_fac_{g_id}")
-                                mod_saved = g_datos.get("modalidad", "Normal")
-                                m_mod = st.radio("Modalidad del Grupo *", ["Normal", "Especial"], index=0 if mod_saved == "Normal" else 1, horizontal=True, key=f"m_mod_{g_id}")
-                                
-                            st.divider()
-                            
-                            if tipo_grupo in ["Terapia de Grupo", "Aquí y Ahora", "Confronto Especial"]:
-                                m_comp = st.text_area("Compartimiento (Texto largo) *", value=g_datos.get("compartimiento", ""), key=f"m_comp_{g_id}")
-                                m_obs = st.text_area("Observaciones (Texto largo)", value=g_datos.get("observaciones", ""), key=f"m_obs_{g_id}")
-                                m_dev = st.text_area("Devoluciones (Texto largo)", value=g_datos.get("devoluciones", ""), key=f"m_dev_{g_id}")
-                                m_cpr = st.text_area("¿Cómo se queda y a qué se compromete? *", value=g_datos.get("compromiso", ""), key=f"m_cpr_{g_id}")
-                                
-                                btn_mod_grp = st.form_submit_button("💾 Guardar Cambios en la Sesión", use_container_width=True)
-                                if btn_mod_grp:
-                                    if not m_fac or not m_comp or not m_cpr:
-                                        st.error("⚠️ Facilitador, Compartimiento y Compromiso son campos obligatorios.")
-                                    else:
-                                        m_datos_json = {
-                                            "modalidad": m_mod,
-                                            "compartimiento": m_comp,
-                                            "observaciones": m_obs,
-                                            "devoluciones": m_dev,
-                                            "compromiso": m_cpr
-                                        }
-                                        modificar_grupo_terapeuto(g_id, m_f_grupo, m_fac, m_datos_json, st.session_state["username"])
-                                        st.toast("🎉 ¡Sesión actualizada exitosamente!")
-                                        st.success("✅ ¡La sesión fue actualizada correctamente!")
-                                        st.rerun()
-                            else: # Feedback
-                                m_log = st.text_area("Logros (Texto largo) *", value=g_datos.get("logros", ""), key=f"m_log_{g_id}")
-                                m_dif = st.text_area("Dificultades (Texto largo) *", value=g_datos.get("dificultades", ""), key=f"m_dif_{g_id}")
-                                m_obs = st.text_area("Observaciones (Texto largo)", value=g_datos.get("observaciones", ""), key=f"m_obs_{g_id}")
-                                m_dev = st.text_area("Devoluciones (Texto largo)", value=g_datos.get("devoluciones", ""), key=f"m_dev_{g_id}")
-                                m_cpr = st.text_area("¿Cómo se queda y a qué se compromete? *", value=g_datos.get("compromiso", ""), key=f"m_cpr_{g_id}")
-                                
-                                btn_mod_grp = st.form_submit_button("💾 Guardar Cambios en la Sesión", use_container_width=True)
-                                if btn_mod_grp:
-                                    if not m_fac or not m_log or not m_dif or not m_cpr:
-                                        st.error("⚠️ Facilitador, Logros, Dificultades y Compromiso son campos obligatorios.")
-                                    else:
-                                        m_datos_json = {
-                                            "modalidad": m_mod,
-                                            "logros": m_log,
-                                            "dificultades": m_dif,
-                                            "observaciones": m_obs,
-                                            "devoluciones": m_dev,
-                                            "compromiso": m_cpr
-                                        }
-                                        modificar_grupo_terapeuto(g_id, m_f_grupo, m_fac, m_datos_json, st.session_state["username"])
-                                        st.toast("🎉 ¡Sesión actualizada exitosamente!")
-                                        st.success("✅ ¡La sesión fue actualizada correctamente!")
-                                        st.rerun()
+                    st.divider()
+                    
+                    if tipo_grupo in ["Terapia de Grupo", "Aquí y Ahora", "Confronto Especial"]:
+                        compartimiento = st.text_area("Compartimiento (Texto largo) *", value=datos_prev_json.get("compartimiento", ""))
+                        observaciones = st.text_area("Observaciones (Texto largo)", value=datos_prev_json.get("observaciones", ""))
+                        devoluciones = st.text_area("Devoluciones (Texto largo)", value=datos_prev_json.get("devoluciones", ""))
+                        compromiso = st.text_area("¿Cómo se queda y a qué se compromete? *", value=datos_prev_json.get("compromiso", ""))
                         
-                        col_act1, col_act2 = st.columns(2)
-                        with col_act1:
-                            pdf_s_file = generar_pdf_sesion_grupo(g_id)
-                            if pdf_s_file:
-                                with open(pdf_s_file, "rb") as f_pdf:
-                                    st.download_button(
-                                        label="🖨️ Imprimir / Descargar esta Sesión (PDF)",
-                                        data=f_pdf,
-                                        file_name=pdf_s_file,
-                                        mime="application/pdf",
-                                        key=f"btn_pdf_single_{g_id}",
-                                        use_container_width=True
-                                    )
-                        with col_act2:
-                            if st.button(f"🗑️ Eliminar Sesión #{g_id}", key=f"btn_del_grp_{g_id}", use_container_width=True):
-                                eliminar_grupo_terapeuto(g_id)
-                                st.toast(f"🗑️ Sesión #{g_id} eliminada.")
-                                st.success("✅ Sesión eliminada correctamente.")
+                        btn_guardar_grupo = st.form_submit_button(f"💾 Guardar Registro de {tipo_grupo}", use_container_width=True)
+                        
+                        if btn_guardar_grupo:
+                            if not facilitador_nombre.strip() or not compartimiento.strip() or not compromiso.strip():
+                                st.error("⚠️ Facilitador, Compartimiento y Compromiso son campos obligatorios.")
+                            else:
+                                datos_grp = {
+                                    "modalidad": modalidad_txt,
+                                    "compartimiento": compartimiento.strip(),
+                                    "observaciones": observaciones.strip(),
+                                    "devoluciones": devoluciones.strip(),
+                                    "compromiso": compromiso.strip()
+                                }
+                                if g_edit_id:
+                                    conn = sqlite3.connect(DB_FILE)
+                                    c = conn.cursor()
+                                    f_str = f_grupo.strftime("%Y-%m-%d") if isinstance(f_grupo, (date, datetime)) else str(f_grupo)
+                                    c.execute('''UPDATE grupos_terapeutos SET tipo_grupo=?, fecha_grupo=?, facilitador=?, datos_json=? WHERE id=?''',
+                                              (tipo_grupo, f_str, facilitador_nombre.strip(), json.dumps(datos_grp, ensure_ascii=False), g_edit_id))
+                                    conn.commit()
+                                    conn.close()
+                                    st.toast("🎉 ¡Sesión actualizada exitosamente!")
+                                    st.success("✅ ¡Sesión de grupo actualizada correctamente!")
+                                else:
+                                    guardar_grupo_terapeuto(p_id_g, tipo_grupo, p_etapa_g, f_grupo, facilitador_nombre.strip(), datos_grp, st.session_state["username"])
+                                    st.toast(f"🎉 ¡Sesión de {tipo_grupo} registrada!")
+                                    st.success(f"✅ ¡Sesión de **{tipo_grupo}** ({modalidad_txt}) registrada exitosamente para **{p_nombre_g}**!")
+                                st.balloons()
+                                st.rerun()
+                    else: # Feedback
+                        logros = st.text_area("Logros (Texto largo) *", value=datos_prev_json.get("logros", ""))
+                        dificultades = st.text_area("Dificultades (Texto largo) *", value=datos_prev_json.get("dificultades", ""))
+                        observaciones = st.text_area("Observaciones (Texto largo)", value=datos_prev_json.get("observaciones", ""))
+                        devoluciones = st.text_area("Devoluciones (Texto largo)", value=datos_prev_json.get("devoluciones", ""))
+                        compromiso = st.text_area("¿Cómo se queda y a qué se compromete? *", value=datos_prev_json.get("compromiso", ""))
+                        
+                        btn_guardar_grupo = st.form_submit_button("💾 Guardar Registro de Feedback", use_container_width=True)
+                        
+                        if btn_guardar_grupo:
+                            if not facilitador_nombre.strip() or not logros.strip() or not dificultades.strip() or not compromiso.strip():
+                                st.error("⚠️ Facilitador, Logros, Dificultades y Compromiso son campos obligatorios.")
+                            else:
+                                datos_grp = {
+                                    "modalidad": modalidad_txt,
+                                    "logros": logros.strip(),
+                                    "dificultades": dificultades.strip(),
+                                    "observaciones": observaciones.strip(),
+                                    "devoluciones": devoluciones.strip(),
+                                    "compromiso": compromiso.strip()
+                                }
+                                if g_edit_id:
+                                    conn = sqlite3.connect(DB_FILE)
+                                    c = conn.cursor()
+                                    f_str = f_grupo.strftime("%Y-%m-%d") if isinstance(f_grupo, (date, datetime)) else str(f_grupo)
+                                    c.execute('''UPDATE grupos_terapeutos SET tipo_grupo=?, fecha_grupo=?, facilitador=?, datos_json=? WHERE id=?''',
+                                              (tipo_grupo, f_str, facilitador_nombre.strip(), json.dumps(datos_grp, ensure_ascii=False), g_edit_id))
+                                    conn.commit()
+                                    conn.close()
+                                    st.toast("🎉 ¡Sesión actualizada exitosamente!")
+                                    st.success("✅ ¡Sesión de Feedback actualizada correctamente!")
+                                else:
+                                    guardar_grupo_terapeuto(p_id_g, tipo_grupo, p_etapa_g, f_grupo, facilitador_nombre.strip(), datos_grp, st.session_state["username"])
+                                    st.toast("🎉 ¡Sesión de Feedback registrada!")
+                                    st.success(f"✅ ¡Sesión de **Feedback** ({modalidad_txt}) registrada exitosamente!")
+                                st.balloons()
                                 st.rerun()
 
         with tab_hist_g:
@@ -1355,82 +1250,65 @@ else:
                 st.info("No hay usuarios registrados.")
             else:
                 dict_hist = {f"{p[1]} ({p[0]})": p[0] for p in pacientes_todos}
-                sel_h = st.selectbox("🔑 Selecciona el Paciente para Ver Expediente y Conteo de Grupos", list(dict_hist.keys()))
+                sel_h = st.selectbox("🔑 Selecciona el Paciente para Ver Expediente de Grupos", list(dict_hist.keys()))
                 p_id_h = dict_hist[sel_h]
-                p_h_data = obtener_paciente(p_id_h)
-                p_h_etapa_actual = p_h_data[7] if p_h_data else "ACOGIDA"
-                
-                st.subheader(f"📊 Conteo de Sesiones por Etapa: **{p_h_data[1] if p_h_data else p_id_h}**")
-                st.caption(f"Etapa Actual en el Proceso: **{p_h_etapa_actual}**")
-                
-                # Resumen por tipo de grupo en la etapa actual
-                c_aha = contar_grupos_etapa(p_id_h, p_h_etapa_actual, "Aquí y Ahora")
-                c_ter = contar_grupos_etapa(p_id_h, p_h_etapa_actual, "Terapia de Grupo")
-                c_fee = contar_grupos_etapa(p_id_h, p_h_etapa_actual, "Feedback")
-                c_cnf = contar_grupos_etapa(p_id_h, p_h_etapa_actual, "Confronto Especial")
-                
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Aquí y Ahora", f"{c_aha} sesiones")
-                m2.metric("Terapia de Grupo", f"{c_ter} sesiones")
-                m3.metric("Feedback", f"{c_fee} sesiones")
-                m4.metric("Confronto Especial", f"{c_cnf} sesiones")
-                
-                st.divider()
                 
                 pdf_grp = generar_pdf_historial_grupos(p_id_h)
                 with open(pdf_grp, "rb") as f:
                     st.download_button(
-                        label="🖨️ Descargar Expediente Completo de Grupos (PDF)",
+                        label="🖨️ Descargar Expediente Completo de Grupos en PDF",
                         data=f,
                         file_name=pdf_grp,
                         mime="application/pdf",
-                        key=f"pdf_grp_{p_id_h}",
-                        use_container_width=True
+                        key=f"pdf_grp_{p_id_h}"
                     )
                     
                 st.divider()
+                st.subheader("📊 Resumen de Sesiones por Etapa")
+                p_data_h = obtener_paciente(p_id_h)
+                p_et_act = p_data_h[7] if p_data_h else "ACOGIDA"
+                c1_g, c2_g, c3_g, c4_g = st.columns(4)
+                c1_g.metric("Terapia de Grupo", contar_grupos_etapa(p_id_h, p_et_act, "Terapia de Grupo"))
+                c2_g.metric("Aquí y Ahora", contar_grupos_etapa(p_id_h, p_et_act, "Aquí y Ahora"))
+                c3_g.metric("Feedback", contar_grupos_etapa(p_id_h, p_et_act, "Feedback"))
+                c4_g.metric("Confronto Especial", contar_grupos_etapa(p_id_h, p_et_act, "Confronto Especial"))
+                
+                st.divider()
+                st.subheader("📜 Historial Detallado de Sesiones")
                 grupos_list = listar_grupos_paciente(p_id_h)
                 if not grupos_list:
                     st.warning("Este usuario no tiene sesiones de grupo registradas.")
                 else:
-                    st.subheader(f"📜 Historial Completo ({len(grupos_list)} sesiones)")
                     for g in grupos_list:
                         gid, tgrp, etapa, fgrp, fac, djson, freg, ureg = g
                         datos = json.loads(djson)
-                        mod_text = datos.get("modalidad", "Normal")
-                        with st.expander(f"🗣️ **{tgrp}** ({mod_text}) | Fecha: {fgrp} | Etapa: {etapa} | Facilitador: {fac}"):
-                            st.write(f"**Modalidad:** {mod_text} | **Registrado por:** {ureg} el {freg}")
-                            if tgrp in ["Terapia de Grupo", "Aquí y Ahora", "Confronto Especial"]:
-                                st.write(f"**Compartimiento:** {datos.get('compartimiento', '')}")
-                                st.write(f"**Observaciones:** {datos.get('observaciones', '')}")
-                                st.write(f"**Devoluciones:** {datos.get('devoluciones', '')}")
-                                st.write(f"**¿Cómo se queda y compromiso?:** {datos.get('compromiso', '')}")
-                            else:
-                                st.write(f"**Logros:** {datos.get('logros', '')}")
-                                st.write(f"**Dificultades:** {datos.get('dificultades', '')}")
-                                st.write(f"**Observaciones:** {datos.get('observaciones', '')}")
-                                st.write(f"**Devoluciones:** {datos.get('devoluciones', '')}")
-                                st.write(f"**¿Cómo se queda y compromiso?:** {datos.get('compromiso', '')}")
-                                
-                            col_e1, col_e2 = st.columns(2)
-                            with col_e1:
-                                pdf_s_hist = generar_pdf_sesion_grupo(gid)
-                                if pdf_s_hist:
-                                    with open(pdf_s_hist, "rb") as f_pdf_s:
-                                        st.download_button(
-                                            label=f"🖨️ Imprimir Sesión #{gid} (PDF)",
-                                            data=f_pdf_s,
-                                            file_name=pdf_s_hist,
-                                            mime="application/pdf",
-                                            key=f"btn_pdf_hist_s_{gid}"
-                                        )
-                            with col_e2:
-                                if st.button(f"🗑️ Eliminar Sesión #{gid}", key=f"btn_del_hist_s_{gid}"):
-                                    eliminar_grupo_terapeuto(gid)
-                                    st.toast(f"🗑️ Sesión #{gid} eliminada.")
+                        mod_badge = f" [Modalidad: {datos.get('modalidad', 'Normal')}]"
+                        with st.expander(f"🗣️ **{tgrp}**{mod_badge} | Fecha: {fgrp} | Etapa: {etapa} | Facilitador: {fac}"):
+                            c_dh1, c_dh2 = st.columns([4, 1])
+                            with c_dh1:
+                                st.write(f"**Registrado por:** {ureg} el {freg}")
+                                if tgrp in ["Terapia de Grupo", "Aquí y Ahora", "Confronto Especial"]:
+                                    st.write(f"**Compartimiento:** {datos.get('compartimiento', '')}")
+                                    st.write(f"**Observaciones:** {datos.get('observaciones', '')}")
+                                    st.write(f"**Devoluciones:** {datos.get('devoluciones', '')}")
+                                    st.write(f"**¿Cómo se queda y compromiso?:** {datos.get('compromiso', '')}")
+                                else:
+                                    st.write(f"**Logros:** {datos.get('logros', '')}")
+                                    st.write(f"**Dificultades:** {datos.get('dificultades', '')}")
+                                    st.write(f"**Observaciones:** {datos.get('observaciones', '')}")
+                                    st.write(f"**Devoluciones:** {datos.get('devoluciones', '')}")
+                                    st.write(f"**¿Cómo se queda y compromiso?:** {datos.get('compromiso', '')}")
+                            with c_dh2:
+                                if st.button("🗑️ Eliminar", key=f"del_grp_item_{gid}"):
+                                    conn = sqlite3.connect(DB_FILE)
+                                    c = conn.cursor()
+                                    c.execute("DELETE FROM grupos_terapeutos WHERE id = ?", (gid,))
+                                    conn.commit()
+                                    conn.close()
+                                    st.toast("🗑️ Sesión de grupo eliminada.")
                                     st.rerun()
 
-    # ==========================================
+        # ==========================================
     # --- SECCIÓN 4: CONTROL DE MEDICAMENTOS Y DOSIS ---
     # ==========================================
     elif menu == "💊 Control de Medicamentos y Dosis":
@@ -1854,7 +1732,7 @@ else:
     elif menu == "⚙️ Configuración / Seguridad":
         st.title("⚙️ Configuración del Sistema & Seguridad")
         
-        tab_sec1, tab_sec2 = st.tabs(["🔑 Cambiar Contraseña", "⚙️ Administrar Requisitos por Etapa"])
+        tab_sec1, tab_sec2, tab_sec3 = st.tabs(["🔑 Cambiar Contraseña", "👥 Usuarios y Roles del Sistema", "⚙️ Administrar Requisitos por Etapa"])
         
         with tab_sec1:
             st.subheader("Cambiar Contraseña de Usuario Staff")
@@ -1869,7 +1747,7 @@ else:
                         st.error("Las nuevas contraseñas no coinciden.")
                     else:
                         user_ok = verificar_login(st.session_state["username"], actual_pass)
-                        if user_ok:
+                        if user_ok and user_ok != "BLOQUEADO":
                             conn = sqlite3.connect(DB_FILE)
                             c = conn.cursor()
                             c.execute('UPDATE usuarios SET password_hash = ? WHERE username = ?', (hash_pass(nueva_pass), st.session_state["username"]))
@@ -1881,6 +1759,115 @@ else:
                             st.error("La contraseña actual es incorrecta.")
                             
         with tab_sec2:
+            st.subheader("👥 Gestión de Usuarios y Roles del Sistema")
+            st.caption("Alta de personal de staff, asignación de roles (Administrador, Consejero, Médico/Farmacia) y bloqueo por vacaciones")
+            
+            rol_actual = st.session_state.get("rol", "Administrador")
+            if rol_actual != "Administrador":
+                st.warning("🔒 Esta sección de administración de usuarios y roles es exclusiva para usuarios con rol de **Administrador / Director**.")
+            else:
+                modo_usr_sys = st.radio("Acción a Realizar:", ["🆕 Registrar Nuevo Usuario", "✏️ Editar / Modificar Usuario Existente"], horizontal=True, key="radio_usr_sys")
+                
+                lista_usr_sys = obtener_usuarios_sistema()
+                usr_edit_data = None
+                edit_uname = ""
+                
+                if modo_usr_sys == "✏️ Editar / Modificar Usuario Existente":
+                    if not lista_usr_sys:
+                        st.info("No hay usuarios registrados en el sistema.")
+                    else:
+                        dict_usr = {f"{u[2]} ({u[1]}) - Rol: {u[3]} [{'Activo' if u[4]=='A' else 'Bloqueado'}]": u for u in lista_usr_sys}
+                        sel_u_str = st.selectbox("🔑 Selecciona el Usuario del Sistema a Editar", list(dict_usr.keys()))
+                        usr_edit_data = dict_usr[sel_u_str]
+                        edit_uname = usr_edit_data[1]
+                        
+                with st.form("form_gestion_usuario_sistema"):
+                    c_u1, c_u2 = st.columns(2)
+                    with c_u1:
+                        val_uname = usr_edit_data[1] if usr_edit_data else ""
+                        sys_uname = st.text_input("👤 Nombre de Usuario (Login) *", value=val_uname, disabled=(modo_usr_sys == "✏️ Editar / Modificar Usuario Existente"))
+                        
+                        val_full = usr_edit_data[2] if usr_edit_data else ""
+                        sys_full = st.text_input("📛 Nombre Completo del Usuario *", value=val_full)
+                        
+                    with c_u2:
+                        roles_opts = ["Administrador", "Consejero / Evaluador Clínico", "Médico / Farmacia"]
+                        idx_r = 0
+                        if usr_edit_data and usr_edit_data[3] in roles_opts:
+                            idx_r = roles_opts.index(usr_edit_data[3])
+                        sys_rol = st.selectbox("🏷️ Rol de Sistema *", roles_opts, index=idx_r)
+                        
+                        est_opts = ["A - Activo", "B - Bloqueado (Vacaciones / Inactivo)"]
+                        idx_e = 0
+                        if usr_edit_data and usr_edit_data[4] == 'B':
+                            idx_e = 1
+                        sys_est_sel = st.selectbox("📌 Estatus de la Cuenta *", est_opts, index=idx_e)
+                        sys_est = 'A' if sys_est_sel.startswith('A') else 'B'
+                        
+                    pass_lbl = "🔑 Contraseña (dejar en blanco para conservar actual)" if modo_usr_sys == "✏️ Editar / Modificar Usuario Existente" else "🔑 Contraseña *"
+                    sys_pass = st.text_input(pass_lbl, type="password")
+                    
+                    btn_save_sys_usr = st.form_submit_button("💾 Guardar Usuario del Sistema", use_container_width=True)
+                    
+                    if btn_save_sys_usr:
+                        if modo_usr_sys == "🆕 Registrar Nuevo Usuario":
+                            if not sys_uname.strip() or not sys_full.strip() or not sys_pass:
+                                st.error("⚠️ Nombre de usuario, nombre completo y contraseña son campos obligatorios para nuevos usuarios.")
+                            else:
+                                ok_u, msg_u = guardar_usuario_sistema(sys_uname.strip(), sys_pass, sys_full.strip(), sys_rol, sys_est)
+                                if ok_u:
+                                    st.toast(f"🎉 ¡Usuario {sys_uname} registrado exitosamente!")
+                                    st.success(f"✅ ¡Usuario **{sys_full}** (`{sys_uname}`) registrado exitosamente con rol **{sys_rol}**!")
+                                    st.balloons()
+                                    st.rerun()
+                                else:
+                                    st.error(f"❌ {msg_u}")
+                        else:
+                            if not sys_full.strip():
+                                st.error("⚠️ El nombre completo es obligatorio.")
+                            else:
+                                ok_u, msg_u = guardar_usuario_sistema(edit_uname, sys_pass if sys_pass else None, sys_full.strip(), sys_rol, sys_est)
+                                if ok_u:
+                                    st.toast(f"🎉 ¡Usuario {edit_uname} actualizado exitosamente!")
+                                    st.success(f"✅ ¡Usuario **{sys_full}** (`{edit_uname}`) actualizado exitosamente!")
+                                    st.rerun()
+                                else:
+                                    st.error(f"❌ {msg_u}")
+                                    
+                st.divider()
+                st.subheader("📋 Directorio de Usuarios del Sistema")
+                if not lista_usr_sys:
+                    st.info("No hay usuarios registrados.")
+                else:
+                    for u_item in lista_usr_sys:
+                        uid, uname, ufull, urol, uest = u_item
+                        st_badge = "🟢 Activo" if uest == 'A' else "🔒 Bloqueado (Vacaciones)"
+                        col_us1, col_us2, col_us3 = st.columns([3, 1, 1])
+                        with col_us1:
+                            st.write(f"👤 **{ufull}** (`{uname}`) | Rol: **{urol}** | Estatus: {st_badge}")
+                        with col_us2:
+                            if uest == 'A':
+                                dis_block = (uname == st.session_state["username"] or uname == "admin")
+                                if st.button("🔒 Bloquear", key=f"btn_blk_sys_{uname}", disabled=dis_block, help="Bloquear por vacaciones o inactividad"):
+                                    cambiar_estatus_usuario_sistema(uname, 'B')
+                                    st.toast(f"🔒 Usuario {uname} bloqueado por vacaciones.")
+                                    st.rerun()
+                            else:
+                                if st.button("🟢 Activar", key=f"btn_act_sys_{uname}"):
+                                    cambiar_estatus_usuario_sistema(uname, 'A')
+                                    st.toast(f"🟢 Usuario {uname} reactivado.")
+                                    st.rerun()
+                        with col_us3:
+                            dis_del = (uname == st.session_state["username"] or uname == "admin")
+                            if st.button("🗑️ Eliminar", key=f"btn_del_sys_{uname}", disabled=dis_del):
+                                ok_d, msg_d = eliminar_usuario_sistema(uname)
+                                if ok_d:
+                                    st.toast(f"🗑️ Usuario {uname} eliminado.")
+                                    st.rerun()
+                                else:
+                                    st.error(msg_d)
+                                    
+        with tab_sec3:
             st.subheader("Administrador de Requisitos por Etapa")
             etapa_sel = st.selectbox("Selecciona la Etapa a Configurar", ["ACOGIDA", "IDENTIFICACIÓN", "ELABORACIÓN", "CONSOLIDACIÓN", "SERVICIO SOCIAL"])
             
