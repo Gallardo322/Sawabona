@@ -7,7 +7,7 @@ import base64
 
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(
-    page_title="Blog Familiar - Lara 1, Lara 5 y Sra. McCormick para el Mundo",
+    page_title="Blog Familiar - Recuerdos y Historias",
     page_icon="🏡",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -15,12 +15,12 @@ st.set_page_config(
 
 DB_FILE = "blog_familiar.db"
 
-# --- FUNCIONES DE BASE DE DATOS Y MIGRACIONES ---
+# --- FUNCIONES DE BASE DE DATOS ---
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     
-    # 1. Tabla de Secciones / Categorías
+    # Tabla de Secciones / Categorías
     c.execute('''
         CREATE TABLE IF NOT EXISTS secciones (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -32,7 +32,7 @@ def init_db():
         )
     ''')
     
-    # 2. Tabla de Publicaciones / Artículos
+    # Tabla de Publicaciones / Artículos
     c.execute('''
         CREATE TABLE IF NOT EXISTS articulos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -49,36 +49,46 @@ def init_db():
             video_nombre TEXT,
             video_url TEXT,
             fecha_publicacion TEXT,
-            destacado INTEGER DEFAULT 0
+            destacado INTEGER DEFAULT 0,
+            archivo_bytes BLOB,
+            archivo_nombre TEXT
         )
     ''')
     
-    # Migración: Agregar imagenes_json y reacciones_json si faltan
+    # Auto-migración por si la tabla articulos ya existía sin archivo_bytes
     c.execute("PRAGMA table_info(articulos)")
-    cols_art = [col[1] for col in c.fetchall()]
-    if 'imagenes_json' not in cols_art:
+    cols_art = [row[1] for row in c.fetchall()]
+    if "archivo_bytes" not in cols_art:
         try:
-            c.execute("ALTER TABLE articulos ADD COLUMN imagenes_json TEXT")
+            c.execute("ALTER TABLE articulos ADD COLUMN archivo_bytes BLOB")
         except Exception:
             pass
-    if 'reacciones_json' not in cols_art:
+    if "archivo_nombre" not in cols_art:
         try:
-            c.execute("ALTER TABLE articulos ADD COLUMN reacciones_json TEXT")
+            c.execute("ALTER TABLE articulos ADD COLUMN archivo_nombre TEXT")
         except Exception:
             pass
 
-    # 3. Tabla de Comentarios de la Familia
+    # Tabla de Comentarios y Reacciones
     c.execute('''
         CREATE TABLE IF NOT EXISTS comentarios (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             articulo_id INTEGER NOT NULL,
-            autor TEXT NOT NULL,
+            nombre_usuario TEXT NOT NULL,
             comentario TEXT NOT NULL,
-            fecha_comentario TEXT NOT NULL
+            fecha TEXT NOT NULL
         )
     ''')
-
-    # Poblar secciones base si la tabla está vacía
+    
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS reacciones (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            articulo_id INTEGER NOT NULL,
+            tipo_reaccion TEXT NOT NULL
+        )
+    ''')
+    
+    # Poblar secciones por defecto si la tabla está vacía
     c.execute('SELECT COUNT(*) FROM secciones')
     if c.fetchone()[0] == 0:
         secciones_base = [
@@ -101,7 +111,7 @@ def init_db():
             'Lara 1, Lara 5 y Sra. McCormick para el Mundo',
             '✍️ El Rincón de Berta',
             'Berta',
-            'Nos da muchísima alegría estrenar este rincón digital para la familia.\n\nAquí podremos compartir nuestras historias deportivas, las mejores recetas de cocina, fotos de nuestras reuniones y artículos especiales.\n\n¡Esperamos que disfruten mucho este espacio hecho con todo el cariño!',
+            'Nos da muchísima alegría estrenar este rincón digital para la familia.\n\nAquí podremos compartir nuestras historias deportivas, las mejores recetas de cocina, fotos de nuestras reuniones, presentaciones y artículos especiales.\n\n¡Esperamos que disfruten mucho este espacio hecho con todo el cariño!',
             f_act,
             1
         ))
@@ -111,7 +121,7 @@ def init_db():
 
 init_db()
 
-# --- FUNCIONES DE CONSULTA Y OPERACIONES ---
+# --- FUNCIONES AUXILIARES DE CONSULTA ---
 def obtener_secciones_activas():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -147,60 +157,41 @@ def cambiar_estatus_seccion(seccion_id, nuevo_estatus):
     conn.commit()
     conn.close()
 
-def guardar_articulo(titulo, subtitulo, seccion, autor, contenido, ingredientes, pasos, img_bytes, img_nom, vid_bytes, vid_nom, vid_url, destacado, imagenes_list=None):
+def guardar_articulo(titulo, subtitulo, seccion, autor, contenido, ingredientes, pasos, img_bytes, img_nom, vid_bytes, vid_nom, vid_url, destacado, doc_bytes=None, doc_nom=None):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     f_act = datetime.now().strftime("%Y-%m-%d %H:%M")
-    
-    # Convertir lista de imágenes base64 si existen
-    imgs_json = json.dumps(imagenes_list, ensure_ascii=False) if imagenes_list else None
-    reacciones_init = json.dumps({"me_gusta": 0, "bravo": 0, "delicioso": 0, "amor": 0})
-    
     c.execute('''
         INSERT INTO articulos (
             titulo, subtitulo, seccion, autor, contenido, ingredientes, pasos_receta,
             imagen_bytes, imagen_nombre, video_bytes, video_nombre, video_url, fecha_publicacion, destacado,
-            imagenes_json, reacciones_json
+            archivo_bytes, archivo_nombre
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (
-        titulo, subtitulo, seccion, autor, contenido, ingredientes, pasos,
-        img_bytes, img_nom, vid_bytes, vid_nom, vid_url, f_act, destacado,
-        imgs_json, reacciones_init
-    ))
+    ''', (titulo, subtitulo, seccion, autor, contenido, ingredientes, pasos, img_bytes, img_nom, vid_bytes, vid_nom, vid_url, f_act, destacado, doc_bytes, doc_nom))
     conn.commit()
     conn.close()
 
-def actualizar_articulo(art_id, titulo, subtitulo, seccion, autor, contenido, ingredientes, pasos, img_bytes, img_nom, vid_bytes, vid_nom, vid_url, destacado, imagenes_list=None):
+def actualizar_articulo(art_id, titulo, subtitulo, seccion, autor, contenido, ingredientes, pasos, img_bytes, img_nom, vid_bytes, vid_nom, vid_url, destacado, doc_bytes=None, doc_nom=None):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    imgs_json = json.dumps(imagenes_list, ensure_ascii=False) if imagenes_list else None
     
-    if img_bytes is not None and vid_bytes is not None:
-        c.execute('''
-            UPDATE articulos SET titulo=?, subtitulo=?, seccion=?, autor=?, contenido=?, ingredientes=?, pasos_receta=?,
-            imagen_bytes=?, imagen_nombre=?, video_bytes=?, video_nombre=?, video_url=?, destacado=?, imagenes_json=? WHERE id=?
-        ''', (titulo, subtitulo, seccion, autor, contenido, ingredientes, pasos, img_bytes, img_nom, vid_bytes, vid_nom, vid_url, destacado, imgs_json, art_id))
-    elif img_bytes is not None:
-        c.execute('''
-            UPDATE articulos SET titulo=?, subtitulo=?, seccion=?, autor=?, contenido=?, ingredientes=?, pasos_receta=?,
-            imagen_bytes=?, imagen_nombre=?, video_url=?, destacado=?, imagenes_json=? WHERE id=?
-        ''', (titulo, subtitulo, seccion, autor, contenido, ingredientes, pasos, img_bytes, img_nom, vid_url, destacado, imgs_json, art_id))
-    elif vid_bytes is not None:
-        c.execute('''
-            UPDATE articulos SET titulo=?, subtitulo=?, seccion=?, autor=?, contenido=?, ingredientes=?, pasos_receta=?,
-            video_bytes=?, video_nombre=?, video_url=?, destacado=?, imagenes_json=? WHERE id=?
-        ''', (titulo, subtitulo, seccion, autor, contenido, ingredientes, pasos, vid_bytes, vid_nom, vid_url, destacado, imgs_json, art_id))
-    else:
-        if imgs_json:
-            c.execute('''
-                UPDATE articulos SET titulo=?, subtitulo=?, seccion=?, autor=?, contenido=?, ingredientes=?, pasos_receta=?,
-                video_url=?, destacado=?, imagenes_json=? WHERE id=?
-            ''', (titulo, subtitulo, seccion, autor, contenido, ingredientes, pasos, vid_url, destacado, imgs_json, art_id))
-        else:
-            c.execute('''
-                UPDATE articulos SET titulo=?, subtitulo=?, seccion=?, autor=?, contenido=?, ingredientes=?, pasos_receta=?,
-                video_url=?, destacado=? WHERE id=?
-            ''', (titulo, subtitulo, seccion, autor, contenido, ingredientes, pasos, vid_url, destacado, art_id))
+    c.execute('SELECT imagen_bytes, imagen_nombre, video_bytes, video_nombre, archivo_bytes, archivo_nombre FROM articulos WHERE id = ?', (art_id,))
+    prev = c.fetchone()
+    
+    final_img_b = img_bytes if img_bytes is not None else (prev[0] if prev else None)
+    final_img_n = img_nom if img_nom is not None else (prev[1] if prev else None)
+    final_vid_b = vid_bytes if vid_bytes is not None else (prev[2] if prev else None)
+    final_vid_n = vid_nom if vid_nom is not None else (prev[3] if prev else None)
+    final_doc_b = doc_bytes if doc_bytes is not None else (prev[4] if prev else None)
+    final_doc_n = doc_nom if doc_nom is not None else (prev[5] if prev else None)
+
+    c.execute('''
+        UPDATE articulos SET 
+            titulo=?, subtitulo=?, seccion=?, autor=?, contenido=?, ingredientes=?, pasos_receta=?,
+            imagen_bytes=?, imagen_nombre=?, video_bytes=?, video_nombre=?, video_url=?, destacado=?,
+            archivo_bytes=?, archivo_nombre=?
+        WHERE id=?
+    ''', (titulo, subtitulo, seccion, autor, contenido, ingredientes, pasos, final_img_b, final_img_n, final_vid_b, final_vid_n, vid_url, destacado, final_doc_b, final_doc_n, art_id))
     conn.commit()
     conn.close()
 
@@ -209,13 +200,14 @@ def eliminar_articulo(art_id):
     c = conn.cursor()
     c.execute('DELETE FROM articulos WHERE id = ?', (art_id,))
     c.execute('DELETE FROM comentarios WHERE articulo_id = ?', (art_id,))
+    c.execute('DELETE FROM reacciones WHERE articulo_id = ?', (art_id,))
     conn.commit()
     conn.close()
 
 def obtener_articulos_por_seccion(seccion_nombre=None, solo_destacados=False, busqueda=None):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    query = 'SELECT id, titulo, subtitulo, seccion, autor, contenido, ingredientes, pasos_receta, imagen_bytes, imagen_nombre, video_bytes, video_nombre, video_url, fecha_publicacion, destacado, imagenes_json, reacciones_json FROM articulos WHERE 1=1'
+    query = 'SELECT id, titulo, subtitulo, seccion, autor, contenido, ingredientes, pasos_receta, imagen_bytes, imagen_nombre, video_bytes, video_nombre, video_url, fecha_publicacion, destacado, archivo_bytes, archivo_nombre FROM articulos WHERE 1=1'
     params = []
     
     if seccion_nombre and seccion_nombre != "🏠 Inicio / Novedades":
@@ -226,9 +218,9 @@ def obtener_articulos_por_seccion(seccion_nombre=None, solo_destacados=False, bu
         query += ' AND destacado = 1'
         
     if busqueda:
-        query += ' AND (LOWER(titulo) LIKE ? OR LOWER(contenido) LIKE ? OR LOWER(autor) LIKE ?)'
+        query += ' AND (LOWER(titulo) LIKE ? OR LOWER(contenido) LIKE ? OR LOWER(autor) LIKE ? OR LOWER(archivo_nombre) LIKE ?)'
         b_term = f"%{busqueda.lower()}%"
-        params.extend([b_term, b_term, b_term])
+        params.extend([b_term, b_term, b_term, b_term])
         
     query += ' ORDER BY id DESC'
     c.execute(query, params)
@@ -239,39 +231,46 @@ def obtener_articulos_por_seccion(seccion_nombre=None, solo_destacados=False, bu
 def obtener_articulo_por_id(art_id):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('SELECT id, titulo, subtitulo, seccion, autor, contenido, ingredientes, pasos_receta, imagen_bytes, imagen_nombre, video_bytes, video_nombre, video_url, fecha_publicacion, destacado, imagenes_json, reacciones_json FROM articulos WHERE id = ?', (art_id,))
+    c.execute('SELECT id, titulo, subtitulo, seccion, autor, contenido, ingredientes, pasos_receta, imagen_bytes, imagen_nombre, video_bytes, video_nombre, video_url, fecha_publicacion, destacado, archivo_bytes, archivo_nombre FROM articulos WHERE id = ?', (art_id,))
     row = c.fetchone()
     conn.close()
     return row
 
-# --- FUNCIONES DE REACCIONES Y COMENTARIOS ---
-def agregar_reaccion(art_id, tipo_reaccion):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('SELECT reacciones_json FROM articulos WHERE id = ?', (art_id,))
-    row = c.fetchone()
-    reacciones = json.loads(row[0]) if row and row[0] else {"me_gusta": 0, "bravo": 0, "delicioso": 0, "amor": 0}
-    reacciones[tipo_reaccion] = reacciones.get(tipo_reaccion, 0) + 1
-    c.execute('UPDATE articulos SET reacciones_json = ? WHERE id = ?', (json.dumps(reacciones), art_id))
-    conn.commit()
-    conn.close()
-
-def agregar_comentario(art_id, autor, comentario):
+# Funciones de Comentarios y Reacciones
+def agregar_comentario(art_id, usuario, texto):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     f_act = datetime.now().strftime("%Y-%m-%d %H:%M")
-    c.execute('INSERT INTO comentarios (articulo_id, autor, comentario, fecha_comentario) VALUES (?, ?, ?, ?)',
-              (art_id, autor, comentario, f_act))
+    c.execute('INSERT INTO comentarios (articulo_id, nombre_usuario, comentario, fecha) VALUES (?, ?, ?, ?)', (art_id, usuario, texto, f_act))
     conn.commit()
     conn.close()
 
-def obtener_comentarios_articulo(art_id):
+def obtener_comentarios(art_id):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('SELECT id, autor, comentario, fecha_comentario FROM comentarios WHERE articulo_id = ? ORDER BY id ASC', (art_id,))
+    c.execute('SELECT nombre_usuario, comentario, fecha FROM comentarios WHERE articulo_id = ? ORDER BY id ASC', (art_id,))
     rows = c.fetchall()
     conn.close()
     return rows
+
+def agregar_reaccion(art_id, tipo):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('INSERT INTO reacciones (articulo_id, tipo_reaccion) VALUES (?, ?)', (art_id, tipo))
+    conn.commit()
+    conn.close()
+
+def obtener_conteo_reacciones(art_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('SELECT tipo_reaccion, COUNT(*) FROM reacciones WHERE articulo_id = ? GROUP BY tipo_reaccion', (art_id,))
+    rows = c.fetchall()
+    conn.close()
+    res = {"❤️": 0, "👏": 0, "😋": 0, "😍": 0}
+    for r in rows:
+        if r[0] in res:
+            res[r[0]] = r[1]
+    return res
 
 # --- DISEÑO Y ESTILOS PERSONALES ---
 st.markdown("""
@@ -279,32 +278,33 @@ st.markdown("""
     .main-header {
         text-align: center;
         background: linear-gradient(135deg, #f6d365 0%, #fda085 100%);
-        padding: 28px;
-        border-radius: 18px;
+        padding: 25px;
+        border-radius: 15px;
         color: #2c3e50;
         margin-bottom: 25px;
-        box-shadow: 0 4px 15px rgba(0,0,0,0.08);
-    }
-    .main-subtitle {
-        font-size: 1.25rem;
-        font-weight: 600;
-        margin-top: 8px;
-        color: #2d3748;
-        letter-spacing: 0.5px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.08);
     }
     .berta-header {
         text-align: center;
         background: linear-gradient(135deg, #a8edea 0%, #fed6e3 100%);
-        padding: 28px;
-        border-radius: 18px;
+        padding: 25px;
+        border-radius: 15px;
         color: #2c3e50;
         margin-bottom: 25px;
-        box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+        box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+    }
+    .card-post {
+        background-color: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-radius: 12px;
+        padding: 20px;
+        margin-bottom: 20px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.04);
     }
     .badge-sec {
         background-color: #ebf8ff;
         color: #2b6cb0;
-        padding: 5px 12px;
+        padding: 4px 10px;
         border-radius: 20px;
         font-weight: bold;
         font-size: 0.85rem;
@@ -312,24 +312,17 @@ st.markdown("""
     .badge-author {
         background-color: #faf5ff;
         color: #6b46c1;
-        padding: 5px 12px;
+        padding: 4px 10px;
         border-radius: 20px;
         font-weight: bold;
         font-size: 0.85rem;
-    }
-    .preview-box {
-        border: 2px dashed #4a5568;
-        background-color: #f7fafc;
-        border-radius: 12px;
-        padding: 20px;
-        margin-top: 15px;
     }
 </style>
 """, unsafe_allow_html=True)
 
 # --- MENÚ LATERAL Y NAVEGACIÓN ---
 st.sidebar.title("🏡 Blog Familiar")
-st.sidebar.markdown("**Lara 1, Lara 5 y Sra. McCormick para el Mundo**")
+st.sidebar.markdown("### *Lara 1, Lara 5 y Sra. McCormick para el Mundo*")
 st.sidebar.caption("Nuestras historias, fotos, recetas y recuerdos")
 
 secciones_db = obtener_secciones_activas()
@@ -339,118 +332,135 @@ menu_sel = st.sidebar.radio("Navegar por el Blog", opciones_menu)
 
 st.sidebar.write("---")
 st.sidebar.markdown("💡 **Búsqueda Rápida**")
-busqueda_txt = st.sidebar.text_input("Buscar palabras o temas", placeholder="Ej. receta, torneo, viaje...")
+busqueda_txt = st.sidebar.text_input("Buscar palabras, archivos o temas", placeholder="Ej. presentación, receta, viaje...")
 
-# LISTA MAESTRA DE AUTORES
-AUTORES_PREDEFINIDOS = ["Berta", "Lara 1", "Lara 5", "Sra. McCormick", "Familia", "Otro / Invitado"]
+# Función auxiliar para renderizar un artículo completo en lectura
+def renderizar_articulo(art):
+    art_id = art[0]
+    art_titulo = art[1]
+    art_subtitulo = art[2]
+    art_seccion = art[3]
+    art_autor = art[4]
+    art_contenido = art[5]
+    art_ing = art[6]
+    art_pasos = art[7]
+    art_img_b = art[8]
+    art_img_n = art[9]
+    art_vid_b = art[10]
+    art_vid_n = art[11]
+    art_vid_url = art[12]
+    art_fecha = art[13]
+    art_destacado = art[14]
+    art_doc_b = art[15] if len(art) > 15 else None
+    art_doc_n = art[16] if len(art) > 16 else None
+
+    st.markdown(f"## {art_titulo}")
+    if art_subtitulo:
+        st.markdown(f"#### _{art_subtitulo}_")
+    
+    col_meta1, col_meta2 = st.columns([3, 1])
+    with col_meta1:
+        st.markdown(f"<span class='badge-sec'>{art_seccion}</span> &nbsp; <span class='badge-author'>✍️ {art_autor}</span>", unsafe_allow_html=True)
+    with col_meta2:
+        st.caption(f"📅 {art_fecha}")
+    
+    # Imagen adjunta
+    if art_img_b:
+        st.image(art_img_b, caption=art_img_n if art_img_n else art_titulo, use_container_width=True)
+        
+    # Video adjunto
+    if art_vid_b:
+        st.video(art_vid_b)
+    elif art_vid_url:
+        st.video(art_vid_url)
+        
+    # Contenido principal
+    st.markdown(art_contenido)
+    
+    # DOCUMENTO / PRESENTACIÓN ADJUNTA (PowerPoint, PDF, Word, etc.)
+    if art_doc_b:
+        st.markdown("---")
+        st.info(f"📊 **Documento / Presentación Adjunta**: `{art_doc_n if art_doc_n else 'Presentacion.pptx'}`")
+        
+        mime_type = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        if art_doc_n:
+            if art_doc_n.endswith(".pdf"):
+                mime_type = "application/pdf"
+            elif art_doc_n.endswith(".docx"):
+                mime_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            elif art_doc_n.endswith(".zip"):
+                mime_type = "application/zip"
+
+        st.download_button(
+            label=f"📥 Descargar {art_doc_n if art_doc_n else 'Presentación PowerPoint'}",
+            data=art_doc_b,
+            file_name=art_doc_n if art_doc_n else "presentacion.pptx",
+            mime=mime_type,
+            use_container_width=True,
+            key=f"dl_btn_{art_id}"
+        )
+    
+    # Sección de Recetas
+    if art_ing or art_pasos:
+        st.divider()
+        st.subheader("🍳 Ficha de Receta Culinary")
+        c_rec1, c_rec2 = st.columns(2)
+        with c_rec1:
+            st.markdown("### 🛒 Ingredientes")
+            st.info(art_ing if art_ing else "No especificados")
+        with c_rec2:
+            st.markdown("### 👩‍🍳 Modo de Preparación")
+            st.success(art_pasos if art_pasos else "No especificados")
+            
+    # REACCIONES Y COMENTARIOS
+    st.write("")
+    col_react, col_comm = st.columns([1, 1])
+    
+    conteo_r = obtener_conteo_reacciones(art_id)
+    with col_react:
+        st.markdown("**Reacciones de la Familia:**")
+        c_r1, c_r2, c_r3, c_r4 = st.columns(4)
+        if c_r1.button(f"❤️ {conteo_r['❤️']}", key=f"react_love_{art_id}"):
+            agregar_reaccion(art_id, "❤️")
+            st.rerun()
+        if c_r2.button(f"👏 {conteo_r['👏']}", key=f"react_bravo_{art_id}"):
+            agregar_reaccion(art_id, "👏")
+            st.rerun()
+        if c_r3.button(f"😋 {conteo_r['😋']}", key=f"react_yummy_{art_id}"):
+            agregar_reaccion(art_id, "😋")
+            st.rerun()
+        if c_r4.button(f"😍 {conteo_r['😍']}", key=f"react_like_{art_id}"):
+            agregar_reaccion(art_id, "😍")
+            st.rerun()
+
+    with col_comm:
+        comments = obtener_comentarios(art_id)
+        with st.expander(f"💬 Comentarios ({len(comments)})"):
+            for c_nom, c_txt, c_fec in comments:
+                st.markdown(f"**{c_nom}** <span style='font-size:0.8rem; color:gray;'>({c_fec})</span>: {c_txt}", unsafe_allow_html=True)
+            
+            with st.form(key=f"form_comm_{art_id}", clear_on_submit=True):
+                c_autor = st.text_input("Tu Nombre", value="Familiar", key=f"c_aut_{art_id}")
+                c_texto = st.text_input("Escribe un comentario...", key=f"c_txt_{art_id}")
+                if st.form_submit_button("Enviar Comentario"):
+                    if c_texto.strip():
+                        agregar_comentario(art_id, c_autor.strip(), c_texto.strip())
+                        st.toast("Comentario enviado!")
+                        st.rerun()
+
+    st.write("---")
 
 # ==============================================================================
 # VISTAS DE LECTURA DE SECCIONES
 # ==============================================================================
-
-def renderizar_publicacion(art):
-    # art: id(0), titulo(1), subtitulo(2), seccion(3), autor(4), contenido(5), ingredientes(6), pasos(7), img_bytes(8), img_nom(9), vid_bytes(10), vid_nom(11), vid_url(12), fecha(13), destacado(14), imagenes_json(15), reacciones_json(16)
-    art_id = art[0]
-    st.markdown(f"## {art[1]}")
-    if art[2]:
-        st.markdown(f"#### _{art[2]}_")
-        
-    col_meta1, col_meta2 = st.columns([3, 1])
-    with col_meta1:
-        st.markdown(f"<span class='badge-sec'>{art[3]}</span> &nbsp; <span class='badge-author'>✍️ {art[4]}</span>", unsafe_allow_html=True)
-    with col_meta2:
-        st.caption(f"📅 {art[13]}")
-        
-    # Imagen Principal
-    if art[8]:
-        st.image(art[8], caption=art[9] if art[9] else art[1], use_container_width=True)
-        
-    # Galería de Múltiples Imágenes si existen
-    if len(art) > 15 and art[15]:
-        try:
-            imgs_list = json.loads(art[15])
-            if imgs_list:
-                st.markdown("##### 📸 Álbum de Fotografías")
-                cols_gal = st.columns(min(len(imgs_list), 3))
-                for idx_i, img_b64 in enumerate(imgs_list):
-                    with cols_gal[idx_i % 3]:
-                        st.image(base64.b64decode(img_b64), use_container_width=True)
-        except Exception:
-            pass
-
-    # Video adjunto
-    if art[10]:
-        st.video(art[10])
-    elif art[12]:
-        st.video(art[12])
-        
-    # Contenido principal
-    st.markdown(art[5])
-    
-    # Sección especial de Recetas
-    if art[6] or art[7]:
-        st.divider()
-        st.subheader("🍳 Ficha de Receta Culinaria")
-        c_rec1, c_rec2 = st.columns(2)
-        with c_rec1:
-            st.markdown("### 🛒 Ingredientes")
-            st.info(art[6] if art[6] else "No especificados")
-        with c_rec2:
-            st.markdown("### 👩‍🍳 Modo de Preparación")
-            st.success(art[7] if art[7] else "No especificados")
-
-    # --- REACCIONES Y COMENTARIOS ---
-    st.write("---")
-    reacciones = json.loads(art[16]) if len(art) > 16 and art[16] else {"me_gusta": 0, "bravo": 0, "delicioso": 0, "amor": 0}
-    
-    c_r1, c_r2, c_r3, c_r4 = st.columns(4)
-    with c_r1:
-        if st.button(f"❤️ Me gusta ({reacciones.get('me_gusta', 0)})", key=f"react_mg_{art_id}"):
-            agregar_reaccion(art_id, "me_gusta")
-            st.rerun()
-    with c_r2:
-        if st.button(f"👏 ¡Bravo! ({reacciones.get('bravo', 0)})", key=f"react_br_{art_id}"):
-            agregar_reaccion(art_id, "bravo")
-            st.rerun()
-    with c_r3:
-        if st.button(f"😋 Delicioso ({reacciones.get('delicioso', 0)})", key=f"react_del_{art_id}"):
-            agregar_reaccion(art_id, "delicioso")
-            st.rerun()
-    with c_r4:
-        if st.button(f"😍 Me encanta ({reacciones.get('amor', 0)})", key=f"react_am_{art_id}"):
-            agregar_reaccion(art_id, "amor")
-            st.rerun()
-
-    # Comentarios de la Familia
-    with st.expander(f"💬 Comentarios de la Familia ({len(obtener_comentarios_articulo(art_id))})"):
-        comms = obtener_comentarios_articulo(art_id)
-        if comms:
-            for c_id, c_autor, c_txt, c_fecha in comms:
-                st.markdown(f"**{c_autor}** _({c_fecha})_:")
-                st.write(f"> {c_txt}")
-        else:
-            st.caption("Aún no hay comentarios. ¡Sé el primero en escribir algo!")
-            
-        with st.form(f"form_comentario_{art_id}", clear_on_submit=True):
-            col_c1, col_c2 = st.columns([1, 3])
-            with col_c1:
-                c_nom = st.text_input("Tu Nombre", key=f"nom_com_{art_id}")
-            with col_c2:
-                c_msg = st.text_input("Escribe tu comentario", key=f"msg_com_{art_id}")
-            if st.form_submit_button("💬 Enviar Comentario"):
-                if c_nom.strip() and c_msg.strip():
-                    agregar_comentario(art_id, c_nom.strip(), c_msg.strip())
-                    st.success("Comentario publicado.")
-                    st.rerun()
-                else:
-                    st.error("Por favor completa tu nombre y el mensaje.")
 
 # --- 1. INICIO / NOVEDADES ---
 if menu_sel == "🏠 Inicio / Novedades":
     st.markdown("""
         <div class="main-header">
             <h1>🏡 Rincón Familiar & Bitácora de Recuerdos</h1>
-            <p class="main-subtitle">Lara 1, Lara 5 y Sra. McCormick para el Mundo</p>
+            <p style="font-size:1.2rem; font-weight:bold; margin-top:5px; color:#2c3e50;">Lara 1, Lara 5 y Sra. McCormick para el Mundo</p>
+            <p style="font-size:1.0rem; margin-top:5px;">El espacio para reunir nuestras vivencias, deportes, cocina y el rincón de Berta.</p>
         </div>
     """, unsafe_allow_html=True)
     
@@ -466,27 +476,19 @@ if menu_sel == "🏠 Inicio / Novedades":
             cols_dest = st.columns(min(len(destacados), 2))
             for i, dest in enumerate(destacados[:2]):
                 with cols_dest[i % 2]:
-                    st.markdown(f"### {dest[1]}")
-                    if dest[2]:
-                        st.caption(f"_{dest[2]}_")
-                    st.markdown(f"<span class='badge-sec'>{dest[3]}</span> <span class='badge-author'>✍️ {dest[4]}</span>", unsafe_allow_html=True)
-                    st.write(f"📅 **{dest[13]}**")
-                    if dest[8]:
-                        st.image(dest[8], use_container_width=True)
-                    st.write(dest[5][:200] + ("..." if len(dest[5]) > 200 else ""))
-                    st.write("---")
+                    renderizar_articulo(dest)
                     
         st.subheader("📜 Todas las Publicaciones")
         for art in arts:
-            renderizar_publicacion(art)
-            st.divider()
+            renderizar_articulo(art)
 
 # --- 2. VISTA ESPECÍFICA: EL RINCÓN DE BERTA ---
 elif menu_sel == "✍️ El Rincón de Berta":
     st.markdown("""
         <div class="berta-header">
             <h1>🌸 El Rincón de Berta</h1>
-            <p class="main-subtitle">Lara 1, Lara 5 y Sra. McCormick para el Mundo</p>
+            <p style="font-size:1.15rem; font-weight:bold; margin-top:5px; color:#2c3e50;">Lara 1, Lara 5 y Sra. McCormick para el Mundo</p>
+            <p style="font-size:1.0rem; margin-top:5px;">Pensamientos, reflexiones, memorias y las columnas especiales escritas por Berta.</p>
         </div>
     """, unsafe_allow_html=True)
     
@@ -496,15 +498,14 @@ elif menu_sel == "✍️ El Rincón de Berta":
         st.info("🌷 Aún no hay artículos publicados en el Rincón de Berta. ¡Próximamente nuevas reflexiones!")
     else:
         for art in arts_berta:
-            renderizar_publicacion(art)
-            st.divider()
+            renderizar_articulo(art)
 
 # --- 3. VISTA ESPECÍFICA: COCINA Y RECETARIO ---
 elif menu_sel == "🍳 Cocina y Recetario":
     st.markdown("""
-        <div class="main-header" style="background: linear-gradient(135deg, #ff9a9e 0%, #fecfef 100%);">
+        <div class="main-header" style="background: linear-gradient(135deg, #ff9a9e 0%, #fecfef 99%, #fecfef 100%);">
             <h1>🍳 El Recetario de la Familia</h1>
-            <p class="main-subtitle">Lara 1, Lara 5 y Sra. McCormick para el Mundo</p>
+            <p style="font-size:1.15rem; margin-top:5px;">Nuestros platillos favoritos, postres, secretos de cocina y tradiciones culinarias.</p>
         </div>
     """, unsafe_allow_html=True)
     
@@ -514,17 +515,16 @@ elif menu_sel == "🍳 Cocina y Recetario":
         st.info("🍲 ¡Aún no hay recetas guardadas! Agrega la primera en el Panel de Administración.")
     else:
         for art in arts_cocina:
-            renderizar_publicacion(art)
-            st.divider()
+            renderizar_articulo(art)
 
-# --- 4. OTRAS SECCIONES DINÁMICAS ---
+# --- 4. OTRAS SECCIONES DINÁMICAS (Deportes, Galería, Personalizadas) ---
 elif menu_sel in [s[1] for s in secciones_db]:
     sec_info = next((s for s in secciones_db if s[1] == menu_sel), None)
     
     st.markdown(f"""
         <div class="main-header">
             <h1>{sec_info[1]}</h1>
-            <p class="main-subtitle">Lara 1, Lara 5 y Sra. McCormick para el Mundo</p>
+            <p style="font-size:1.15rem; margin-top:5px;">{sec_info[3] if sec_info[3] else 'Espacio de publicaciones compartidas'}</p>
         </div>
     """, unsafe_allow_html=True)
     
@@ -534,8 +534,7 @@ elif menu_sel in [s[1] for s in secciones_db]:
         st.info(f"📌 Aún no hay publicaciones en la sección **{menu_sel}**.")
     else:
         for art in arts_sec:
-            renderizar_publicacion(art)
-            st.divider()
+            renderizar_articulo(art)
 
 # ==============================================================================
 # PANEL DE ADMINISTRACIÓN / GESTOR DE CONTENIDOS
@@ -543,7 +542,7 @@ elif menu_sel in [s[1] for s in secciones_db]:
 elif menu_sel == "⚙️ Panel de Administración":
     st.title("⚙️ Panel de Administración del Blog Familiar")
     st.caption("Lara 1, Lara 5 y Sra. McCormick para el Mundo")
-    st.write("Desde aquí puedes redactar nuevos artículos, subir fotos o videos, crear nuevas secciones y administrar las publicaciones.")
+    st.write("Desde aquí puedes redactar nuevos artículos, subir fotos, videos, archivos PowerPoint/PDF, crear secciones y administrar publicaciones.")
     
     tab_admin1, tab_admin2, tab_admin3 = st.tabs([
         "📝 Publicar Nuevo Artículo",
@@ -559,122 +558,67 @@ elif menu_sel == "⚙️ Panel de Administración":
         if not sec_activas:
             st.error("No hay secciones activas creadas. Crea una sección primero en la pestaña 'Crear / Administrar Secciones'.")
         else:
-            col_form, col_prev = st.columns([1, 1])
-            
-            with col_form:
-                st.markdown("#### 1. Formulario de Captura")
-                
-                a_titulo = st.text_input("Título de la Publicación *", key="a_tit")
-                a_subtitulo = st.text_input("Subtítulo o Resumen Corto", key="a_sub")
-                
-                col_au1, col_au2 = st.columns(2)
-                with col_au1:
-                    sel_aut_option = st.selectbox("Autor(a) / Quien Publica *", AUTORES_PREDEFINIDOS)
-                    if sel_aut_option == "Otro / Invitado":
-                        a_autor = st.text_input("Escribe el nombre del Autor", value="Invitado Especial")
+            with st.form("form_nuevo_articulo", clear_on_submit=True):
+                col_a1, col_a2 = st.columns(2)
+                with col_a1:
+                    a_titulo = st.text_input("Título de la Publicación *")
+                    a_subtitulo = st.text_input("Subtítulo o Resumen Corto", value="Lara 1, Lara 5 y Sra. McCormick para el Mundo")
+                    a_autor_sel = st.selectbox("Autor(a) / Quien Publica *", ["Berta", "Lara 1", "Lara 5", "Sra. McCormick", "Familia", "Otro (Escribir)"])
+                    if a_autor_sel == "Otro (Escribir)":
+                        a_autor = st.text_input("Escribe el nombre del autor:", value="Berta")
                     else:
-                        a_autor = sel_aut_option
-                with col_au2:
+                        a_autor = a_autor_sel
+                
+                with col_a2:
                     a_seccion = st.selectbox("Sección / Categoría *", [s[1] for s in sec_activas])
+                    a_destacado = st.checkbox("⭐ Marcar como Publicación Destacada (Aparece en la portada)")
                     
-                a_destacado = st.checkbox("⭐ Marcar como Publicación Destacada (Aparece en portada)")
+                a_contenido = st.text_area("Contenido Principal / Texto del Artículo *", height=200, help="Puedes usar formato Markdown (negritas, listas, etc.)")
                 
-                st.markdown("##### ✏️ Editor de Texto Principal")
-                # Botones de ayuda de formato Markdown
-                col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-                with col_m1:
-                    if st.button("<b>Negrita</b>", use_container_width=True):
-                        st.session_state["a_cont"] = st.session_state.get("a_cont", "") + " **texto en negrita** "
-                with col_m2:
-                    if st.button("<i>Cursiva</i>", use_container_width=True):
-                        st.session_state["a_cont"] = st.session_state.get("a_cont", "") + " *texto en cursiva* "
-                with col_m3:
-                    if st.button("📌 Lista", use_container_width=True):
-                        st.session_state["a_cont"] = st.session_state.get("a_cont", "") + "\n- Elemento 1\n- Elemento 2\n"
-                with col_m4:
-                    if st.button("💬 Cita", use_container_width=True):
-                        st.session_state["a_cont"] = st.session_state.get("a_cont", "") + "\n> Frase celebre o cita especial\n"
-
-                a_contenido = st.text_area("Contenido Principal / Texto del Artículo *", height=200, key="a_cont")
-                
-                # Campos especiales si es Cocina
+                # Campos dinámicos si es sección de Cocina
                 if "Cocina" in a_seccion:
-                    st.markdown("##### 🍳 Datos Especiales de Receta (Opcional)")
-                    a_ingredientes = st.text_area("Lista de Ingredientes", placeholder="Ej: 2 tazas de harina, 100g de mantequilla...", height=100)
-                    a_pasos = st.text_area("Pasos de Preparación", placeholder="Ej: 1. Mezclar ingredientes... 2. Hornear a 180°C...", height=100)
+                    st.markdown("### 🍳 Datos Especiales de Receta (Opcional)")
+                    col_c1, col_c2 = st.columns(2)
+                    with col_c1:
+                        a_ingredientes = st.text_area("Lista de Ingredientes", placeholder="Ej: 2 tazas de harina, 100g de mantequilla...", height=120)
+                    with col_c2:
+                        a_pasos = st.text_area("Pasos de Preparación", placeholder="Ej: 1. Mezclar ingredientes dry... 2. Hornear a 180°C...", height=120)
                 else:
                     a_ingredientes = None
                     a_pasos = None
                     
-                st.markdown("##### 📸 Adjuntar Elementos Multimedia")
-                f_img = st.file_uploader("Subir Imagen Principal (JPG, PNG)", type=["jpg", "jpeg", "png", "webp"])
-                f_imgs_multi = st.file_uploader("Subir Álbum de Fotos Múltiples (Galería)", type=["jpg", "jpeg", "png", "webp"], accept_multiple_files=True)
-                f_vid = st.file_uploader("Subir Video Corto (MP4, MOV)", type=["mp4", "mov", "webm"])
-                a_vid_url = st.text_input("O ingresar enlace de Video (YouTube / Vimeo)")
-                
-                btn_publicar = st.button("🚀 Guardar y Publicar en el Blog", use_container_width=True)
-                
-            # --- VISTA PREVIA EN TIEMPO REAL ---
-            with col_prev:
-                st.markdown("#### 👁️ Vista Previa en Tiempo Real")
-                st.caption("Así se verá tu artículo publicado en la sección:")
-                
-                with st.container():
-                    st.markdown("<div class='preview-box'>", unsafe_allow_html=True)
-                    st.markdown(f"## {a_titulo if a_titulo.strip() else 'Título de tu Publicación'}")
-                    if a_subtitulo.strip():
-                        st.markdown(f"#### _{a_subtitulo}_")
-                    st.markdown(f"<span class='badge-sec'>{a_seccion}</span> &nbsp; <span class='badge-author'>✍️ {a_autor}</span>", unsafe_allow_html=True)
-                    st.caption(f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+                st.markdown("### 📸 Adjuntar Fotografías, Videos o Documentos")
+                col_m1, col_m2, col_m3 = st.columns(3)
+                with col_m1:
+                    f_img = st.file_uploader("Subir Fotografía (JPG, PNG)", type=["jpg", "jpeg", "png", "webp"])
+                with col_m2:
+                    f_vid = st.file_uploader("Subir Video Corto (MP4, MOV)", type=["mp4", "mov", "webm"])
+                    a_vid_url = st.text_input("O enlace de Video (YouTube/Vimeo)")
+                with col_m3:
+                    f_doc = st.file_uploader("Subir PowerPoint / Documento (PPTX, PDF, DOCX)", type=["pptx", "ppt", "pdf", "docx", "xlsx", "zip"])
                     
-                    if f_img:
-                        st.image(f_img, caption="Imagen Principal (Vista previa)", use_container_width=True)
-                        
-                    if f_imgs_multi:
-                        st.markdown("##### 📸 Álbum Múltiple (Vista previa)")
-                        cols_p_gal = st.columns(min(len(f_imgs_multi), 3))
-                        for idx_p, fi in enumerate(f_imgs_multi):
-                            with cols_p_gal[idx_p % 3]:
-                                st.image(fi, use_container_width=True)
-                                
-                    if a_contenido.strip():
-                        st.markdown(a_contenido)
+                btn_publicar = st.form_submit_button("🚀 Guardar y Publicar en el Blog", use_container_width=True)
+                
+                if btn_publicar:
+                    if not a_titulo.strip() or not a_contenido.strip():
+                        st.error("⚠️ El Título y el Contenido Principal son obligatorios.")
                     else:
-                        st.info("Escribe el contenido en el panel izquierdo para previsualizar el texto...")
+                        img_b = f_img.read() if f_img else None
+                        img_n = f_img.name if f_img else None
+                        vid_b = f_vid.read() if f_vid else None
+                        vid_n = f_vid.name if f_vid else None
+                        doc_b = f_doc.read() if f_doc else None
+                        doc_n = f_doc.name if f_doc else None
                         
-                    if a_ingredientes or a_pasos:
-                        st.markdown("---")
-                        st.subheader("🍳 Receta")
-                        if a_ingredientes:
-                            st.info(f"**Ingredientes:**\n{a_ingredientes}")
-                        if a_pasos:
-                            st.success(f"**Preparación:**\n{a_pasos}")
-                            
-                    st.markdown("</div>", unsafe_allow_html=True)
-
-            if btn_publicar:
-                if not a_titulo.strip() or not a_contenido.strip():
-                    st.error("⚠️ El Título y el Contenido Principal son obligatorios.")
-                else:
-                    img_b = f_img.read() if f_img else None
-                    img_n = f_img.name if f_img else None
-                    vid_b = f_vid.read() if f_vid else None
-                    vid_n = f_vid.name if f_vid else None
-                    
-                    imgs_multi_b64 = []
-                    if f_imgs_multi:
-                        for f_m in f_imgs_multi:
-                            imgs_multi_b64.append(base64.b64encode(f_m.read()).decode('utf-8'))
-                            
-                    guardar_articulo(
-                        a_titulo.strip(), a_subtitulo.strip(), a_seccion, a_autor.strip(),
-                        a_contenido.strip(), a_ingredientes, a_pasos,
-                        img_b, img_n, vid_b, vid_n, a_vid_url.strip(), 1 if a_destacado else 0,
-                        imagenes_list=imgs_multi_b64
-                    )
-                    st.success(f"🎉 ¡Publicación '**{a_titulo}**' guardada exitosamente en {a_seccion}!")
-                    st.toast("¡Artículo publicado con éxito!", icon="🎉")
-                    st.rerun()
+                        guardar_articulo(
+                            a_titulo.strip(), a_subtitulo.strip(), a_seccion, a_autor.strip(),
+                            a_contenido.strip(), a_ingredientes, a_pasos,
+                            img_b, img_n, vid_b, vid_n, a_vid_url.strip(), 1 if a_destacado else 0,
+                            doc_b, doc_n
+                        )
+                        st.success(f"🎉 ¡Publicación '**{a_titulo}**' guardada exitosamente en la sección {a_seccion}!")
+                        st.toast("¡Artículo publicado con éxito!", icon="🎉")
+                        st.rerun()
 
     # --- TAB 2: CREAR Y CONFIGURAR SECCIONES ---
     with tab_admin2:
@@ -766,13 +710,15 @@ elif menu_sel == "⚙️ Panel de Administración":
                         e_ing = None
                         e_pas = None
                         
-                    st.markdown("#### 📸 Multimedia (Adjuntar solo si deseas reemplazar el actual)")
-                    col_em1, col_em2 = st.columns(2)
+                    st.markdown("#### 📸 Multimedia y Adjuntos (Reemplazar si deseas)")
+                    col_em1, col_em2, col_em3 = st.columns(3)
                     with col_em1:
-                        e_f_img = st.file_uploader("Nueva Imagen (Reemplazar)", type=["jpg", "jpeg", "png", "webp"], key=f"e_img_{pub_id}")
+                        e_f_img = st.file_uploader("Nueva Imagen", type=["jpg", "jpeg", "png", "webp"], key=f"e_img_{pub_id}")
                     with col_em2:
-                        e_f_vid = st.file_uploader("Nuevo Video (Reemplazar)", type=["mp4", "mov", "webm"], key=f"e_vid_{pub_id}")
+                        e_f_vid = st.file_uploader("Nuevo Video", type=["mp4", "mov", "webm"], key=f"e_vid_{pub_id}")
                         e_vid_url = st.text_input("Enlace Video", value=p_data[12] if p_data[12] else "")
+                    with col_em3:
+                        e_f_doc = st.file_uploader("Nuevo PowerPoint / Doc", type=["pptx", "ppt", "pdf", "docx", "xlsx", "zip"], key=f"e_doc_{pub_id}")
                         
                     st.divider()
                     col_btn1, col_btn2 = st.columns(2)
@@ -786,10 +732,13 @@ elif menu_sel == "⚙️ Panel de Administración":
                         img_n = e_f_img.name if e_f_img else None
                         vid_b = e_f_vid.read() if e_f_vid else None
                         vid_n = e_f_vid.name if e_f_vid else None
+                        doc_b = e_f_doc.read() if e_f_doc else None
+                        doc_n = e_f_doc.name if e_f_doc else None
                         
                         actualizar_articulo(
                             pub_id, e_titulo.strip(), e_subtitulo.strip(), e_seccion, e_autor.strip(),
-                            e_contenido.strip(), e_ing, e_pas, img_b, img_n, vid_b, vid_n, e_vid_url.strip(), 1 if e_destacado else 0
+                            e_contenido.strip(), e_ing, e_pas, img_b, img_n, vid_b, vid_n, e_vid_url.strip(), 1 if e_destacado else 0,
+                            doc_b, doc_n
                         )
                         st.success(f"✅ Publicación '**{e_titulo}**' actualizada correctamente.")
                         st.toast("Cambios guardados exitosamente")
@@ -797,6 +746,6 @@ elif menu_sel == "⚙️ Panel de Administración":
                         
                     if btn_borrar:
                         eliminar_articulo(pub_id)
-                        st.warning("🗑️ Publicación eliminada.")
+                        st.warning(f"🗑️ Publicación eliminada.")
                         st.toast("Publicación eliminada")
                         st.rerun()
